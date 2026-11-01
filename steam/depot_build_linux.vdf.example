@@ -1,0 +1,11 @@
+"DepotBuildConfig"
+{
+	"DepotID" "482"
+	"ContentRoot" ".."
+	"FileMapping"
+	{
+		"LocalPath" "dist/linux/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+}

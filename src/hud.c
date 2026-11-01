@@ -1,0 +1,387 @@
+#include "hud.h"
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+static Color white = {0.94f, 0.96f, 1.0f, 1.0f};
+static Color dim = {0.62f, 0.68f, 0.76f, 1.0f};
+static Color accent = {1.0f, 0.62f, 0.16f, 1.0f};
+static Color cyan = {0.22f, 0.78f, 1.0f, 1.0f};
+static Color red = {0.95f, 0.25f, 0.20f, 1.0f};
+static Color green = {0.35f, 0.92f, 0.45f, 1.0f};
+static bool show_fps = true;
+static bool show_crosshair = true;
+static bool show_netgraph = false;
+void hud_set_fps_visible(bool visible) { show_fps = visible; }
+void hud_set_crosshair_visible(bool visible) { show_crosshair = visible; }
+void hud_set_netgraph_visible(bool visible) { show_netgraph = visible; }
+
+static void bar(Ui* ui, float x, float y, float w, float h, float t, Color c, Color bg) {
+    ui_rect(ui, x, y, w, h, bg);
+    ui_rect(ui, x, y, w * clampf(t, 0, 1), h, c);
+    ui_rect_outline(ui, x, y, w, h, col(0, 0, 0, 0.55f), 1);
+    /* shine */
+    ui_rect(ui, x, y, w * clampf(t, 0, 1), h * 0.34f, col(c.r * 1.4f, c.g * 1.4f, c.b * 1.4f, 0.35f));
+}
+
+static void weapon_icon(Ui* ui, float x, float y, float s, int wi, Color c, bool owned) {
+    Color cc = owned ? c : col(0.35f, 0.38f, 0.42f, 0.55f);
+    switch (wi) {
+    case WPN_AR:
+        ui_rect(ui, x + s * 0.10f, y + s * 0.36f, s * 0.75f, s * 0.16f, cc);
+        ui_rect(ui, x + s * 0.55f, y + s * 0.28f, s * 0.28f, s * 0.10f, cc);
+        ui_rect(ui, x + s * 0.22f, y + s * 0.48f, s * 0.12f, s * 0.22f, cc);
+        break;
+    case WPN_SHOCK:
+        ui_rect(ui, x + s * 0.12f, y + s * 0.34f, s * 0.72f, s * 0.20f, cc);
+        for (int i = 0; i < 3; i++) ui_rect(ui, x + s * (0.20f + i * 0.20f), y + s * 0.28f, s * 0.08f, s * 0.32f, col(cc.r, cc.g, cc.b, 0.8f));
+        ui_rect(ui, x + s * 0.06f, y + s * 0.38f, s * 0.10f, s * 0.12f, cc);
+        break;
+    case WPN_ROCKET:
+        ui_rect(ui, x + s * 0.10f, y + s * 0.34f, s * 0.70f, s * 0.22f, cc);
+        ui_rect(ui, x + s * 0.80f, y + s * 0.29f, s * 0.12f, s * 0.32f, cc);
+        ui_rect(ui, x + s * 0.22f, y + s * 0.52f, s * 0.10f, s * 0.20f, cc);
+        break;
+    case WPN_FLAK:
+        ui_rect(ui, x + s * 0.10f, y + s * 0.32f, s * 0.48f, s * 0.24f, cc);
+        ui_rect(ui, x + s * 0.58f, y + s * 0.26f, s * 0.28f, s * 0.36f, cc);
+        ui_rect(ui, x + s * 0.20f, y + s * 0.54f, s * 0.12f, s * 0.18f, cc);
+        break;
+    case WPN_LIGHTNING:
+        ui_rect(ui, x + s * 0.12f, y + s * 0.40f, s * 0.66f, s * 0.14f, cc);
+        ui_rect(ui, x + s * 0.66f, y + s * 0.34f, s * 0.24f, s * 0.06f, cc);
+        ui_rect(ui, x + s * 0.66f, y + s * 0.54f, s * 0.24f, s * 0.06f, cc);
+        for (int i = 0; i < 2; i++) ui_ring(ui, x + s * (0.28f + i * 0.24f), y + s * 0.30f, s * 0.26f, s * 0.36f, col(cc.r, cc.g, cc.b, 0.7f));
+        break;
+    }
+}
+
+static const char* weapon_ammo_name(int wi) {
+    switch (wi) {
+    case WPN_AR: return "ASSAULT RIFLE";
+    case WPN_SHOCK: return "SHOCK RIFLE";
+    case WPN_ROCKET: return "ROCKET LAUNCHER";
+    case WPN_FLAK: return "FLAK CANNON";
+    case WPN_LIGHTNING: return "LIGHTNING GUN";
+    }
+    return "";
+}
+
+void hud_draw_weapon_bar(Ui* ui, Game* g, int w, int h) {
+    Player* p = &g->players[g->local_player];
+    float baseX = (float)w - 36;
+    float y = (float)h - 120;
+    for (int i = 0; i < WPN_COUNT; i++) {
+        float yy = y - i * 42;
+        bool sel = p->weapon == i;
+        bool owned = p->has[i];
+        Color bg = sel ? col(0.16f, 0.30f, 0.44f, 0.92f) : col(0.04f, 0.06f, 0.08f, 0.72f);
+        ui_rect(ui, baseX - 150, yy, 150, 36, bg);
+        ui_rect(ui, baseX - 150, yy, 3, 36, sel ? accent : col(0.24f, 0.28f, 0.33f, 1));
+        weapon_icon(ui, baseX - 142, yy + 4, 28, i, weapon_defs[i].color, owned);
+        char num[16]; snprintf(num, sizeof(num), "%d", p->ammo[i]);
+        ui_text_right(ui, baseX - 10, yy + 9, num, 15, owned ? (sel ? white : dim) : col(0.35f, 0.38f, 0.42f, 0.7f));
+        ui_text(ui, baseX - 106, yy + 10, weapon_defs[i].short_name, 11, owned ? (sel ? white : dim) : col(0.35f, 0.38f, 0.42f, 0.5f));
+    }
+}
+
+void hud_draw(Ui* ui, Game* g, int w, int h) {
+    Player* me = &g->players[g->local_player];
+    float cx = w * 0.5f;
+    float cy = h * 0.5f;
+
+    /* ---------- damage flash ---------- */
+    if (g->damage_flash > 0) {
+        float a = clampf(g->damage_flash, 0, 1) * 0.34f;
+        ui_rect_grad(ui, 0, 0, (float)w, h * 0.35f, col(0.7f, 0.03f, 0.02f, a), col(0.7f, 0.03f, 0.02f, 0));
+        ui_rect_grad(ui, 0, h * 0.65f, (float)w, h * 0.35f, col(0.7f, 0.03f, 0.02f, 0), col(0.7f, 0.03f, 0.02f, a));
+        ui_rect_grad(ui, 0, 0, w * 0.3f, (float)h, col(0.7f, 0.03f, 0.02f, a * 0.7f), col(0.7f, 0.03f, 0.02f, 0));
+        ui_rect_grad(ui, w * 0.7f, 0, w * 0.3f, (float)h, col(0.7f, 0.03f, 0.02f, 0), col(0.7f, 0.03f, 0.02f, a * 0.7f));
+    }
+    if (!me->alive) {
+        ui_rect(ui, 0, 0, (float)w, (float)h, col(0.20f, 0.02f, 0.02f, 0.34f));
+    }
+
+    /* ---------- crosshair ---------- */
+    if (me->alive && show_crosshair) {
+        bool hit = g->hitmarker > 0;
+        Color ch = hit ? col(1.0f, 0.35f, 0.25f, 1.0f) : col(0.95f, 0.98f, 1.0f, 0.92f);
+        float gap = 6 + me->recoil * 5.0f + (v3len(v3(me->vel.x, 0, me->vel.z)) > 2 ? 3.0f : 0.0f);
+        float len = 7;
+        float th = 2;
+        ui_rect(ui, cx - gap - len, cy - th * 0.5f, len, th, ch);
+        ui_rect(ui, cx + gap, cy - th * 0.5f, len, th, ch);
+        ui_rect(ui, cx - th * 0.5f, cy - gap - len, th, len, ch);
+        ui_rect(ui, cx - th * 0.5f, cy + gap, th, len, ch);
+        ui_rect(ui, cx - 1, cy - 1, 2, 2, ch);
+        if (hit) {
+            float t = g->hitmarker / 0.28f;
+            float r = 12 + (1 - t) * 12;
+            Color hc = col(1.0f, 0.4f, 0.2f, t);
+            float d = r * 0.7071f;
+            ui_line(ui, v2(cx - d, cy - d), v2(cx - d + 8, cy - d + 8), hc, 2);
+            ui_line(ui, v2(cx + d, cy - d), v2(cx + d - 8, cy - d + 8), hc, 2);
+            ui_line(ui, v2(cx - d, cy + d), v2(cx - d + 8, cy + d - 8), hc, 2);
+            ui_line(ui, v2(cx + d, cy + d), v2(cx + d - 8, cy + d - 8), hc, 2);
+        }
+    }
+
+    /* ---------- top score strip ---------- */
+    float stripW = 360;
+    float sx = cx - stripW * 0.5f;
+    ui_rect(ui, sx, 0, stripW, 56, col(0.02f, 0.03f, 0.045f, 0.78f));
+    ui_rect(ui, sx, 53, stripW, 3, col(accent.r, accent.g, accent.b, 0.85f));
+    char tbuf[32]; game_time_string(g->time_limit - g->match_time, tbuf, sizeof(tbuf));
+    ui_text_center(ui, cx, 6, tbuf, 25, g->match_time > g->time_limit - 60 ? red : white);
+    char sub[128];
+    if (game_mode_team_based(g->game_mode)) {
+        snprintf(sub, sizeof(sub), "%s   RED %d : %d BLUE   LIMIT %d",
+                 game_mode_short(g->game_mode), g->team_score[0], g->team_score[1], (int)g->score_limit);
+    } else if (g->game_mode == GM_BATTLE_ROYALE) {
+        snprintf(sub, sizeof(sub), "BR   ALIVE %d / %d   ZONE %.0fs", g->br_alive, g->br_total, fmaxf(g->zone_timer, 0));
+    } else {
+        snprintf(sub, sizeof(sub), "%s   FRAG LIMIT %d", game_mode_short(g->game_mode), g->frag_limit);
+    }
+    ui_text_center(ui, cx, 34, sub, 10, dim);
+    ui_text_center(ui, cx, 62, game_mode_name(g->game_mode), 9, col(0.98f, 0.62f, 0.16f, 0.9f));
+
+    /* local score left of strip */
+    char sc[32];
+    if (game_mode_team_based(g->game_mode) && me->team >= 0)
+        snprintf(sc, sizeof(sc), "%d", g->team_score[me->team]);
+    else
+        snprintf(sc, sizeof(sc), "%d", me->frags);
+    ui_text_right(ui, sx - 18, 6, sc, 30, game_mode_team_based(g->game_mode) ? (me->team == 0 ? red : cyan) : white);
+    ui_text_right(ui, sx - 18, 38, game_mode_team_based(g->game_mode) ? "TEAM" : "FRAGS", 9, dim);
+    char dc[32];
+    if (game_mode_team_based(g->game_mode) && me->team >= 0)
+        snprintf(dc, sizeof(dc), "%d", g->team_score[1 - me->team]);
+    else
+        snprintf(dc, sizeof(dc), "%d", me->deaths);
+    ui_text(ui, sx + stripW + 18, 6, dc, 30, game_mode_team_based(g->game_mode) ? (me->team == 0 ? cyan : red) : white);
+    ui_text(ui, sx + stripW + 18, 38, game_mode_team_based(g->game_mode) ? "ENEMY" : "DEATHS", 9, dim);
+
+    /* ---------- kill feed ---------- */
+    float ky = 70;
+    for (int i = 0; i < MAX_KILLFEED; i++) {
+        KillFeedItem* k = &g->killfeed[i];
+        if (k->time <= 0) continue;
+        float a = clampf(k->time, 0, 1);
+        float tw = ui_text_width(ui, k->text, 12) + 18;
+        ui_rect(ui, 22, ky, tw, 23, col(0.02f, 0.03f, 0.05f, 0.66f * a));
+        ui_rect(ui, 22, ky, 3, 23, col(accent.r, accent.g, accent.b, a));
+        ui_text(ui, 32, ky + 4, k->text, 12, col(0.88f, 0.92f, 0.98f, a));
+        ky += 26;
+    }
+
+    /* ---------- bottom left: health / armor ---------- */
+    float bx = 34, by = (float)h - 118;
+    ui_rect(ui, bx - 12, by - 10, 320, 100, col(0.02f, 0.03f, 0.045f, 0.72f));
+    ui_rect(ui, bx - 12, by - 10, 4, 100, col(green.r, green.g, green.b, 0.9f));
+
+    char hbuf[16]; snprintf(hbuf, sizeof(hbuf), "%d", (int)ceilf(me->health));
+    ui_text(ui, bx, by - 4, hbuf, 42, me->health < 30 ? red : white);
+    ui_text(ui, bx + ui_text_width(ui, hbuf, 42) + 8, by + 20, "HEALTH", 10, dim);
+    float maxhp = 100.0f + (float)((me->level > 1 ? me->level : 1) - 1) * 20.0f;
+    bar(ui, bx + 100, by + 8, 190, 14, me->health / maxhp, me->health < 30 ? red : green, col(0.06f, 0.10f, 0.12f, 0.9f));
+
+    char abuf[16]; snprintf(abuf, sizeof(abuf), "%d", (int)ceilf(me->armor));
+    ui_text(ui, bx, by + 46, abuf, 26, me->armor > 0 ? cyan : dim);
+    ui_text(ui, bx + ui_text_width(ui, abuf, 26) + 8, by + 58, "SHIELD", 10, dim);
+    bar(ui, bx + 100, by + 56, 190, 12, me->armor / 100.0f, cyan, col(0.06f, 0.08f, 0.14f, 0.9f));
+
+    if (me->protection > 0) {
+        char pr[32]; snprintf(pr, sizeof(pr), "SPAWN PROTECTION %.1f", me->protection);
+        ui_text(ui, bx + 100, by + 74, pr, 9, col(0.6f, 0.9f, 1.0f, 0.9f));
+    }
+
+    /* ---------- bottom right: weapon + ammo ---------- */
+    int wi = me->weapon;
+    ui_rect(ui, w - 322, h - 118, 290, 100, col(0.02f, 0.03f, 0.045f, 0.72f));
+    ui_rect(ui, w - 36, h - 118, 4, 100, col(accent.r, accent.g, accent.b, 0.9f));
+    weapon_icon(ui, w - 314, h - 110, 44, wi, weapon_defs[wi].color, true);
+    ui_text(ui, w - 258, h - 110, weapon_ammo_name(wi), 12, white);
+    char ammo[32]; snprintf(ammo, sizeof(ammo), "%d", me->ammo[wi]);
+    ui_text_right(ui, w - 44, h - 114, ammo, 46, me->ammo[wi] <= 3 ? red : white);
+    char mx[32]; snprintf(mx, sizeof(mx), "/ %d", weapon_defs[wi].ammo_max);
+    ui_text_right(ui, w - 44, h - 66, mx, 11, dim);
+    ui_text(ui, w - 258, h - 92, "AMMO", 9, dim);
+
+    /* ---------- RPG level / XP ---------- */
+    if (g->game_mode == GM_RPG) {
+        char lv[64];
+        snprintf(lv, sizeof(lv), "LEVEL %d", me->level > 0 ? me->level : 1);
+        ui_text(ui, bx + 100, by + 90, lv, 11, col(0.45f, 1.0f, 0.60f, 1));
+        float xpfrac = me->xp_next > 0 ? (float)me->xp / (float)me->xp_next : 0.0f;
+        bar(ui, bx + 165, by + 92, 125, 7, xpfrac, col(0.45f, 0.95f, 0.55f, 1), col(0.06f, 0.10f, 0.09f, 0.9f));
+        char xb[32]; snprintf(xb, sizeof(xb), "%d / %d XP", me->xp, me->xp_next);
+        ui_text_right(ui, bx + 290, by + 100, xb, 8, dim);
+    }
+
+    /* ---------- objectives ---------- */
+    if (g->node_count > 0) {
+        float ox = cx - (float)g->node_count * 62.0f * 0.5f;
+        for (int i = 0; i < g->node_count; i++) {
+            ControlNode* nd = &g->nodes[i];
+            if (!nd->active) continue;
+            Color nc = nd->team == 0 ? red : (nd->team == 1 ? cyan : col(0.75f, 0.78f, 0.82f, 1));
+            ui_rect(ui, ox + i * 62, (float)h - 172, 54, 26, col(0.02f, 0.03f, 0.05f, 0.72f));
+            ui_rect(ui, ox + i * 62, (float)h - 172, 54, 3, nc);
+            ui_text(ui, ox + i * 62 + 6, (float)h - 166, nd->name, 8, nc);
+            if (nd->progress > 0.01f)
+                bar(ui, ox + i * 62 + 4, (float)h - 152, 46, 4, nd->progress,
+                    nd->attacker >= 0 ? (nd->attacker == 0 ? red : cyan) : accent, col(0.08f, 0.09f, 0.11f, 0.9f));
+        }
+    } else if (g->flags[0].active || g->flags[1].active) {
+        for (int t = 0; t < 2; t++) {
+            Flag* f = &g->flags[t];
+            const char* st = f->carried ? "TAKEN" : (f->dropped ? "DROPPED" : "HOME");
+            char fb[48]; snprintf(fb, sizeof(fb), "%s FLAG %s", t == 0 ? "RED" : "BLUE", st);
+            ui_text(ui, cx - 120 + t * 130, (float)h - 172, fb, 9, t == 0 ? red : cyan);
+        }
+    }
+
+    /* ---------- battle royale zone warning ---------- */
+    if (g->game_mode == GM_BATTLE_ROYALE && me->alive) {
+        float dx = me->pos.x - g->zone_center_x, dz = me->pos.z - g->zone_center_z;
+        bool outside = (dx * dx + dz * dz) > g->zone_radius * g->zone_radius;
+        char zb[128];
+        if (outside) snprintf(zb, sizeof(zb), "OUTSIDE THE ZONE - MOVE TO THE CENTER");
+        else snprintf(zb, sizeof(zb), "ZONE %.0fm   NEXT SHRINK %.0fs", g->zone_radius, fmaxf(g->zone_timer, 0));
+        ui_text_center(ui, cx, (float)h - 208, zb, 11, outside ? col(1.0f, 0.35f, 0.25f, 1) : dim);
+    }
+
+    /* ---------- server zones / channels ---------- */
+    if (g->zone_count > 1 || g->chan_count > 1) {
+        char zc[160];
+        snprintf(zc, sizeof(zc), "ZONE %s %d/%d   CH %s %d/%d   MEGA %d",
+                 g->zone_label[g->zone_id], g->zone_pop[g->zone_id], g->zone_total,
+                 g->chan_label[g->chan_id], g->chan_pop[g->chan_id], g->chan_count, g->zone_total);
+        ui_text_right(ui, (float)w - 22, 90, zc, 9, col(0.45f, 0.56f, 0.68f, 0.85f));
+    }
+
+    /* ---------- netgraph ---------- */
+    if (show_netgraph && (g->networked || g->ping > 0)) {
+        float gw = 148, gh = 54, gx = (float)w - gw - 22, gy = (float)h - 168;
+        ui_rect(ui, gx, gy, gw, gh, col(0.02f, 0.03f, 0.04f, 0.80f));
+        ui_rect(ui, gx, gy, gw, 2, col(accent.r, accent.g, accent.b, 0.8f));
+        char pg[64]; snprintf(pg, sizeof(pg), "PING %.0f ms  SNAP %d", g->ping, g->net_snapshots);
+        ui_text(ui, gx + 7, gy + 6, pg, 8, white);
+        for (int i = 0; i < 12; i++) {
+            float hh = 4 + (float)((i * 37 + (int)g->ping) % 18);
+            Color c = g->ping < 60 ? green : (g->ping < 140 ? accent : red);
+            ui_rect(ui, gx + 8 + i * 11, gy + gh - 6 - hh, 8, hh, c);
+        }
+    }
+
+    /* ---------- pickup message ---------- */
+    if (g->pickup_msg_t > 0) {
+        float a = clampf(g->pickup_msg_t, 0, 1);
+        float tw = ui_text_width(ui, g->pickup_msg, 14) + 30;
+        ui_rect(ui, cx - tw * 0.5f, h - 200, tw, 30, col(0.02f, 0.04f, 0.06f, 0.8f * a));
+        ui_rect_outline(ui, cx - tw * 0.5f, h - 200, tw, 30, col(accent.r, accent.g, accent.b, 0.5f * a), 1);
+        ui_text_center(ui, cx, h - 194, g->pickup_msg, 14, col(1, 0.9f, 0.7f, a));
+    }
+
+    /* ---------- announcements ---------- */
+    if (g->announce_t > 0) {
+        float a = clampf(g->announce_t, 0, 1);
+        float sc = 1.0f + (1.0f - clampf(g->announce_t, 0, 1)) * 0.05f;
+        (void)sc;
+        float tw = ui_text_width(ui, g->announce, 40);
+        ui_rect(ui, cx - tw * 0.5f - 30, h * 0.27f - 10, tw + 60, 62, col(0.02f, 0.03f, 0.05f, 0.62f * a));
+        ui_rect(ui, cx - tw * 0.5f - 30, h * 0.27f - 10, tw + 60, 2, col(g->announce_color.r, g->announce_color.g, g->announce_color.b, a));
+        ui_rect(ui, cx - tw * 0.5f - 30, h * 0.27f + 50, tw + 60, 2, col(g->announce_color.r, g->announce_color.g, g->announce_color.b, a));
+        ui_text_center(ui, cx + 2, h * 0.27f + 2, g->announce, 40, col(0, 0, 0, a * 0.7f));
+        ui_text_center(ui, cx, h * 0.27f, g->announce, 40, col(g->announce_color.r, g->announce_color.g, g->announce_color.b, a));
+    }
+
+    /* ---------- death overlay ---------- */
+    if (!me->alive) {
+        ui_rect(ui, 0, 0, (float)w, (float)h, col(0.1f, 0.01f, 0.01f, 0.25f));
+        ui_text_center(ui, cx, h * 0.34f, "YOU WERE KILLED", 34, col(1.0f, 0.35f, 0.28f, 0.95f));
+        const char* kname = "the arena";
+        if (me->killer >= 0 && me->killer < g->num_players) kname = g->players[me->killer].name;
+        char kb[96]; snprintf(kb, sizeof(kb), "by %s", kname);
+        ui_text_center(ui, cx, h * 0.34f + 44, kb, 18, col(0.9f, 0.85f, 0.85f, 0.9f));
+        char rb[64]; snprintf(rb, sizeof(rb), "RESPAWN IN %.1f", fmaxf(me->respawn_timer, 0));
+        ui_text_center(ui, cx, h * 0.34f + 78, rb, 13, dim);
+    }
+
+    /* ---------- match over ---------- */
+    if (g->match_over) {
+        ui_rect(ui, 0, 0, (float)w, (float)h, col(0.0f, 0.0f, 0.0f, 0.62f));
+        ui_rect(ui, cx - 300, h * 0.22f, 600, 100, col(0.03f, 0.05f, 0.07f, 0.95f));
+        ui_rect(ui, cx - 300, h * 0.22f, 600, 3, accent);
+        ui_text_center(ui, cx, h * 0.22f + 12, "MATCH OVER", 36, accent);
+        const char* wn = (g->winner >= 0 && g->winner < g->num_players) ? g->players[g->winner].name : "-";
+        char wb[96]; snprintf(wb, sizeof(wb), "%s WINS", wn);
+        ui_text_center(ui, cx, h * 0.22f + 58, wb, 20, white);
+        ui_text_center(ui, cx, h * 0.22f + 116, "PRESS  TAB  FOR SCORES   //   F5 TO RESTART", 12, dim);
+    }
+
+    /* ---------- fps / net ---------- */
+    char fb[96];
+    if (g->networked) snprintf(fb, sizeof(fb), "%.0f FPS   PING %.0f ms   NET %s", g->fps, g->ping, g->server_mode ? "HOST" : "CLIENT");
+    else snprintf(fb, sizeof(fb), "%.0f FPS   DEMO", g->fps);
+    if (show_fps || g->networked)
+        ui_text(ui, 22, (float)h - 22, fb, 10, col(0.55f, 0.60f, 0.68f, 0.8f));
+    if (g->demo_mode) {
+        ui_text_right(ui, w - 22, 68, "DEMO // BOT MATCH", 11, col(0.75f, 0.8f, 0.9f, 0.75f));
+    }
+}
+
+void hud_scoreboard(Ui* ui, Game* g, int w, int h) {
+    ScoreEntry scores[MAX_PLAYERS];
+    int n = 0;
+    game_sort_scores(g, scores, &n);
+    int shown = n > 16 ? 16 : n;
+    float pw = 660, ph = 100 + shown * 34 + 40;
+    float px = w * 0.5f - pw * 0.5f, py = h * 0.5f - ph * 0.5f;
+    ui_rect(ui, 0, 0, (float)w, (float)h, col(0, 0, 0, 0.35f));
+    ui_rect(ui, px, py, pw, ph, col(0.025f, 0.035f, 0.05f, 0.96f));
+    ui_rect_outline(ui, px, py, pw, ph, col(0.22f, 0.28f, 0.36f, 1), 1);
+    ui_rect(ui, px, py, pw, 58, col(0.07f, 0.10f, 0.14f, 1));
+    ui_rect(ui, px, py + 55, pw, 3, accent);
+    ui_text(ui, px + 22, py + 10, game_mode_name(g->game_mode), 20, white);
+    char sub[192];
+    if (game_mode_team_based(g->game_mode))
+        snprintf(sub, sizeof(sub), "%s   //   RED %d : %d BLUE   //   LIMIT %d   //   %.0f FPS",
+                 g->world->name, g->team_score[0], g->team_score[1], (int)g->score_limit, g->fps);
+    else
+        snprintf(sub, sizeof(sub), "%s   //   LIMIT %d   //   %.0f FPS", g->world->name, (int)g->score_limit, g->fps);
+    ui_text(ui, px + 22, py + 34, sub, 10, dim);
+
+    float ry = py + 68;
+    ui_text(ui, px + 24, ry, "PLAYER", 10, dim);
+    ui_text(ui, px + pw - 230, ry, "FRAGS", 10, dim);
+    ui_text(ui, px + pw - 150, ry, "DEATHS", 10, dim);
+    ui_text(ui, px + pw - 70, ry, "RATIO", 10, dim);
+    ry += 18;
+    ui_rect(ui, px + 18, ry, pw - 36, 1, col(0.2f, 0.24f, 0.3f, 1));
+    ry += 8;
+    for (int i = 0; i < shown; i++) {
+        ScoreEntry* e = &scores[i];
+        bool local = (e->id == g->local_player);
+        Color bg = local ? col(0.10f, 0.18f, 0.27f, 0.95f) : (i % 2 ? col(0.055f, 0.065f, 0.08f, 0.9f) : col(0.035f, 0.045f, 0.06f, 0.9f));
+        ui_rect(ui, px + 18, ry - 4, pw - 36, 30, bg);
+        if (local) ui_rect(ui, px + 18, ry - 4, 3, 30, accent);
+        ui_rect(ui, px + 28, ry + 3, 16, 16, e->color);
+        ui_text(ui, px + 54, ry, e->name, 14, local ? white : col(0.82f, 0.86f, 0.92f, 1));
+        if (e->bot || local) {
+            const char* tag = local ? "YOU" : "BOT";
+            ui_text(ui, px + 54 + ui_text_width(ui, e->name, 14) + 8, ry + 3, tag, 9, local ? accent : dim);
+        }
+        char v[24];
+        snprintf(v, sizeof(v), "%d", e->frags); ui_text_right(ui, px + pw - 230 + 40, ry, v, 16, white);
+        snprintf(v, sizeof(v), "%d", e->deaths); ui_text_right(ui, px + pw - 150 + 40, ry, v, 14, dim);
+        float ratio = e->deaths > 0 ? (float)e->frags / e->deaths : (float)e->frags;
+        snprintf(v, sizeof(v), "%.2f", ratio); ui_text_right(ui, px + pw - 70 + 30, ry, v, 13, dim);
+        ry += 34;
+    }
+    if (n > shown) {
+        char more[64]; snprintf(more, sizeof(more), "+ %d more players (console: players)", n - shown);
+        ui_text(ui, px + 24, py + ph - 48, more, 9, dim);
+    }
+    ui_text_center(ui, w * 0.5f, py + ph - 28, "TAB: SCORES   //   ESC: MENU   //   F5: RESTART", 10, dim);
+}

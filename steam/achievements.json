@@ -1,0 +1,13 @@
+{
+  "achievements": [
+    { "id": "ARENA_FIRST_FRAG", "name": "First Blood", "description": "Score your first frag." },
+    { "id": "ARENA_FLAWLESS", "name": "Flawless", "description": "Win a match without dying." },
+    { "id": "ARENA_FLAG_CAPTURE", "name": "Flag Runner", "description": "Capture a CTF flag." },
+    { "id": "ARENA_NODE_CAPTURE", "name": "Node Breaker", "description": "Capture an Onslaught/Conquest node." },
+    { "id": "ARENA_VEHICLE_KILL", "name": "Road Rage", "description": "Get a kill while driving a vehicle." },
+    { "id": "ARENA_ROYALE_WIN", "name": "Last One Standing", "description": "Win a Battle Royale." },
+    { "id": "ARENA_LEVEL_10", "name": "Veteran", "description": "Reach RPG level 10." },
+    { "id": "ARENA_MEGA", "name": "Planet Side", "description": "Join a 10,000+ player mega-zone." },
+    { "id": "ARENA_EDITOR", "name": "Level Designer", "description": "Save a map in the UE3-style editor." }
+  ]
+}

@@ -1,0 +1,13 @@
+"DepotBuildConfig"
+{
+	"DepotID" "481"
+	"ContentRoot" ".."
+	"FileMapping"
+	{
+		"LocalPath" "dist/windows/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+	"FileExclusion" "*.ilk"
+}

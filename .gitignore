@@ -1,0 +1,32 @@
+# build artifacts
+build/
+arena2004
+arena2004.exe
+arena2004_lobby
+arena2004_lobby.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+
+# packages
+dist/
+
+# runtime
+arena2004.log
+maps/selftest.map
+steam_appid.txt
+shots/test.png
+shots/ui_test.png
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake

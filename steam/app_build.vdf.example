@@ -1,0 +1,16 @@
+"AppBuild"
+{
+	"AppID" "480"
+	"Desc" "Arena2004 release build"
+	"BuildOutput" "output"
+	"ContentRoot" ".."
+	"SetLive" ""
+	"Preview" "0"
+	"Local" ""
+	"Depots"
+	{
+		"481" "depot_build_windows.vdf"
+		"482" "depot_build_linux.vdf"
+		"483" "depot_build_macos.vdf"
+	}
+}
