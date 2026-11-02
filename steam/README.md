@@ -66,8 +66,8 @@ Der Workflow `.github/workflows/build.yml` baut Linux, macOS und Windows bei
 jedem Push und hängt ZIP-Artefakte an den Run. Für ein Release:
 
 ```bash
-git tag v0.9.0
-git push origin v0.9.0
+git tag v0.9.1
+git push origin v0.9.1
 ```
 
 Danach die drei Artefakte unter *Releases* veröffentlichen. Dieselben ZIPs

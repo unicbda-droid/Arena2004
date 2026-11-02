@@ -31,9 +31,12 @@ typedef struct {
     bool have_snapshot;
     int snap_count;
     PktPlayer snap[PKT_MAX_PLAYERS];
+    uint64_t snap_mask;      /* received chunks of the current snapshot */
+    uint8_t snap_frame;      /* snapshot generation */
     float snap_age;
     /* host: remote players */
     bool remote_alive[PKT_MAX_PLAYERS];
+    uint8_t snap_frame_out;
     uint32_t remote_last_ms[PKT_MAX_PLAYERS];
     struct sockaddr_in peers[PKT_MAX_PLAYERS];
     /* lobby registration */

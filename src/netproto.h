@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define NET_MAGIC 0x41324B34u   /* "A2K4" */
-#define NET_VERSION 3
+#define NET_VERSION 4
 #define NET_MAX_PKT 1200
 
 typedef enum {
@@ -56,8 +56,10 @@ typedef struct {
 } PktWelcome;
 
 typedef struct {
-    uint8_t count;
-    uint8_t pad[3];
+    uint8_t count;   /* players in this chunk */
+    uint8_t start;   /* first player slot in this chunk */
+    uint8_t total;   /* total players in the snapshot */
+    uint8_t frame;   /* snapshot generation, wraps at 255 */
 } PktSnapHead;
 
 typedef struct {
@@ -75,7 +77,9 @@ typedef struct {
     char name[16];
 } PktPlayer;
 
-#define PKT_MAX_PLAYERS 8
+/* UT2004 listen-server scale. A single snapshot is split into chunks so it
+ * always fits into NET_MAX_PKT. */
+#define PKT_MAX_PLAYERS 32
 
 typedef struct {
     char name[24];

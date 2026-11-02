@@ -430,6 +430,7 @@ static const char* CONSOLE_HELP[] = {
     "objectives | score | vehicle [team]  Objectives, Punkte, Fahrzeug",
     "status | players            Server-/Spielerstatus wie CS",
     "protocol | netgraph         Netzwerkprotokoll / Netzanzeige",
+    "nav [rebuild]                Navigationsgraph anzeigen / neu bauen",
     "stats | fps [on/off]         Match-Infos / FPS-Anzeige",
     "log [on|off|datei]           Ereignis-/Protokoll-Log schreiben",
     "event <cmd> | events         Event ausfuehren / Trigger auflisten",
@@ -451,7 +452,7 @@ static const char* CONSOLE_COMMANDS[] = {
     "help","commands","clear","echo","menu","play","demo","host","join","lobbyjoin",
     "disconnect","maps","map","changelevel","nextmap","prevmap","editor","save","load","newmap",
     "spawn","insert","addbot","addplayer","removebot","bot_add","bot_kick","bot_stop","stats","status","players",
-    "protocol","netgraph","fps","god","give","trigger","events","event","setactor",
+    "protocol","netgraph","nav","navstats","fps","god","give","trigger","events","event","setactor",
     "kill","teleport","say","set","get","bind","exec","script","screenshot","opencode",
     "fullscreen","res","resolution","vsync","quit","restart","pause","connect","startserver",
     "password","sv_password","joinpassword","log","mode","gametype","gamemode","scale",
@@ -468,7 +469,8 @@ static const SpawnDef SPAWN_DEFS[] = {
     {"trigger", ACT_TRIGGER, 0}, {"event", ACT_TRIGGER, 0},
     {"light", ACT_LIGHT, 0}, {"playerstart", ACT_PLAYER_START, 0},
     {"spawnpoint", ACT_PLAYER_START, 0}, {"jumppad", ACT_JUMPPAD, 0},
-    {"lava", ACT_LAVA, 0}, {"health", ACT_PICKUP, PICK_HEALTH_BIG},
+    {"lava", ACT_LAVA, 0}, {"navpoint", ACT_NAV_POINT, 0}, {"pathnode", ACT_NAV_POINT, 0},
+    {"health", ACT_PICKUP, PICK_HEALTH_BIG},
     {"healthsmall", ACT_PICKUP, PICK_HEALTH_SMALL}, {"healthbig", ACT_PICKUP, PICK_HEALTH_BIG},
     {"shield", ACT_PICKUP, PICK_ARMOR_BIG}, {"shieldsmall", ACT_PICKUP, PICK_ARMOR_SMALL},
     {"armor", ACT_PICKUP, PICK_ARMOR_BIG}, {"ammo", ACT_PICKUP, PICK_AMMO},
@@ -1060,7 +1062,7 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
     }
     else if (!strcasecmp(cmd, "newmap")) app_new_map(a);
     else if (!strcasecmp(cmd, "spawn") || !strcasecmp(cmd, "insert")) {
-        if (!a1) { con_err(a, "spawn <type> [anzahl]  (brush, light, playerstart, jumppad, lava, health, ar, shock, rocket, flak, lightning, ...)"); return; }
+        if (!a1) { con_err(a, "spawn <type> [anzahl]  (brush, light, playerstart, jumppad, navpoint, lava, health, ar, shock, rocket, flak, lightning, ...)"); return; }
         if (!strcasecmp(a1, "orc") || !strcasecmp(a1, "player") || !strcasecmp(a1, "bot")) {
             int count = a2 ? con_int(a2, 1) : 1;
             for (int i = 0; i < count; i++) app_add_bot(a);
@@ -1107,6 +1109,29 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
         if (a1) a->netgraph = con_bool(a1, !a->netgraph); else a->netgraph = !a->netgraph;
         hud_set_netgraph_visible(a->netgraph);
         con_ok(a, "netgraph = %s", a->netgraph ? "on" : "off");
+    }
+    else if (!strcasecmp(cmd, "nav") || !strcasecmp(cmd, "navstats")) {
+        if (!a->game) { con_err(a, "nav: kein laufendes Match"); return; }
+        Game* g = a->game;
+        if (a1 && (!strcasecmp(a1, "rebuild") || !strcasecmp(a1, "build")))
+            game_build_nav(g);
+        int links = 0, isolated = 0, vertical = 0, padlinks = 0, maxlinks = 0, hints = 0;
+        for (int i = 0; i < g->nav.count; i++) {
+            NavNode* n = &g->nav.nodes[i];
+            links += n->nn;
+            if (n->nn == 0) isolated++;
+            if (n->nn > maxlinks) maxlinks = n->nn;
+            if (n->pad_landing >= 0) padlinks++;
+            if (n->hint) hints++;
+            for (int k = 0; k < n->nn; k++) {
+                int j = n->nb[k];
+                if (j >= 0 && j < g->nav.count && fabsf(g->nav.nodes[j].pos.y - n->pos.y) > 0.8f) vertical++;
+            }
+        }
+        con_ok(a, "NAV %d Knoten, %d Links (%d vertikal, max %d/Knoten), %d isoliert, %d Jump-Pad-Links, %d Hinweis-Punkte",
+               g->nav.count, links, vertical, maxlinks, isolated, padlinks, hints);
+        con_ok(a, "Nav wird automatisch aus der Map-Geometrie gebaut; 'nav rebuild' nach Map-Aenderungen");
+        con_ok(a, "ACT_NAV_POINT / 'spawn navpoint' setzt optionale UT-Pfadhinweise fuer enge Stellen");
     }
     else if (!strcasecmp(cmd, "connect")) {
         if (!a1) { con_err(a, "connect <ip[:port]> [passwort]"); return; }
@@ -2339,10 +2364,128 @@ static void run_selftest(App* a) {
         if (a->game->players[i].alive) alive++;
     }
     int nav = a->game->nav.count;
+    int navlinks = 0, naviso = 0, navpads = 0, navvert = 0, navhints = 0;
+    for (int i = 0; i < a->game->nav.count; i++) {
+        NavNode* n = &a->game->nav.nodes[i];
+        navlinks += n->nn;
+        if (n->nn == 0) naviso++;
+        if (n->pad_landing >= 0) navpads++;
+        if (n->hint) navhints++;
+        for (int k = 0; k < n->nn; k++) {
+            int j = n->nb[k];
+            if (j >= 0 && j < a->game->nav.count && fabsf(a->game->nav.nodes[j].pos.y - n->pos.y) > 0.8f) navvert++;
+        }
+    }
     bool game_png = save_screenshot(a->w, a->h, "shots/selftest_game.png");
     printf("[selftest] game glerr=0x%x\n", glGetError());
     printf("[selftest] game render: %s  players=%d active=%d alive=%d navnodes=%d\n",
            game_png ? "ok" : "FAILED", a->game->num_players, active, alive, nav);
+    int navreach = 0;
+    {
+        bool seen[MAX_NAV]; int queue[MAX_NAV];
+        memset(seen, 0, sizeof(seen));
+        int start = game_nav_nearest(a->game, a->game->players[0].pos, 12.0f);
+        if (start >= 0) {
+            int qh = 0, qt = 0;
+            queue[qt++] = start; seen[start] = true;
+            while (qh < qt) {
+                int u = queue[qh++];
+                navreach++;
+                NavNode* n = &a->game->nav.nodes[u];
+                for (int k = 0; k < n->nn; k++) {
+                    int v = n->nb[k];
+                    if (v >= 0 && v < a->game->nav.count && !seen[v]) {
+                        seen[v] = true;
+                        if (qt < MAX_NAV) queue[qt++] = v;
+                    }
+                }
+            }
+        }
+    }
+    printf("[selftest] nav: nodes=%d links=%d vertical=%d isolated=%d jumppads=%d hints=%d reachable=%d\n",
+           nav, navlinks, navvert, naviso, navpads, navhints, navreach);
+
+    /* authored nav points: placed hints must become nodes and survive pruning */
+    int hintnodes = 0;
+    {
+        Actor ha;
+        Vec3 base = a->game->players[0].pos;
+        world_actor_defaults(&ha, ACT_NAV_POINT, 0);
+        ha.pos = v3add(base, v3(2.5f, 0.0f, 0.0f));
+        int i1 = world_add(a->world, ha);
+        ha.pos = v3add(base, v3(-2.5f, 0.0f, 0.0f));
+        int i2 = world_add(a->world, ha);
+        game_build_nav(a->game);
+        for (int i = 0; i < a->game->nav.count; i++)
+            if (a->game->nav.nodes[i].hint) hintnodes++;
+        if (i2 >= 0) world_delete(a->world, i2);
+        if (i1 >= 0) world_delete(a->world, i1);
+        game_build_nav(a->game);
+    }
+    printf("[selftest] nav hints: %d authored nodes\n", hintnodes);
+
+    /* player movement / coordinate test: drive one player toward a nav
+     * neighbour with synthetic input and require real displacement in the
+     * expected direction. This catches broken WASD/axis math. */
+    bool move_ok = false;
+    {
+        Game* g = a->game;
+        int pi = g->num_players > 1 ? 1 : 0;
+        Player* p = &g->players[pi];
+        static bool saved_active[MAX_PLAYERS];
+        static bool saved_bot[MAX_PLAYERS];
+        for (int i = 0; i < g->num_players; i++) {
+            saved_active[i] = g->players[i].active;
+            saved_bot[i] = g->players[i].bot;
+        }
+        Vec3 saved_pos = p->pos, saved_vel = p->vel;
+        float saved_yaw = p->yaw, saved_prot = p->protection;
+        for (int i = 0; i < g->num_players; i++) if (i != pi) g->players[i].active = false;
+        p->active = true; p->bot = false; p->alive = true;
+        p->respawn_timer = 0; p->protection = 999.0f; p->health = 100.0f;
+        g->start_countdown = 0.0f;
+        g->paused = false;
+
+        int node = game_nav_nearest(g, p->pos, 12.0f);
+        Vec3 target = p->pos;
+        bool have_target = false;
+        if (node >= 0) {
+            NavNode* nn = &g->nav.nodes[node];
+            for (int k = 0; k < nn->nn; k++) {
+                int j = nn->nb[k];
+                if (j < 0 || j >= g->nav.count) continue;
+                Vec3 d = v3sub(g->nav.nodes[j].pos, p->pos);
+                float h = sqrtf(d.x * d.x + d.z * d.z);
+                if (h > 2.0f && h < 7.0f) { target = g->nav.nodes[j].pos; have_target = true; break; }
+            }
+        }
+        if (have_target) {
+            Vec3 before = p->pos;
+            Vec3 dir = v3norm(v3(target.x - p->pos.x, 0, target.z - p->pos.z));
+            p->yaw = atan2f(dir.x, -dir.z);
+            p->pitch = 0;
+            p->vel = v3(0, 0, 0);
+            for (int f = 0; f < 45; f++) {
+                memset(&p->input, 0, sizeof(p->input));
+                p->input.move_z = 1.0f;
+                p->input.yaw = p->yaw;
+                app_frame(a, 1.0f / 60.0f);
+            }
+            Vec3 moved = v3sub(p->pos, before);
+            float dist = sqrtf(moved.x * moved.x + moved.z * moved.z);
+            float dot = dist > 0.01f ? (moved.x * dir.x + moved.z * dir.z) / dist : -1.0f;
+            move_ok = dist > 1.2f && dot > 0.5f;
+            printf("[selftest] movement: dist=%.2f dir_dot=%.2f %s\n",
+                   dist, dot, move_ok ? "ok" : "FAILED");
+        } else {
+            printf("[selftest] movement: no nav target FAILED\n");
+        }
+        p->pos = saved_pos; p->vel = saved_vel; p->yaw = saved_yaw; p->protection = saved_prot;
+        for (int i = 0; i < g->num_players; i++) {
+            g->players[i].active = saved_active[i];
+            g->players[i].bot = saved_bot[i];
+        }
+    }
 
     /* game mode / scale smoke tests */
     bool modes_ok = true;
@@ -2444,8 +2587,9 @@ static void run_selftest(App* a) {
     printf("[selftest] audio: %s\n", audio_active() ? "ok" : "silent");
     GLenum glerr = glGetError();
     printf("[selftest] gl errors: 0x%x\n", glerr);
+    bool nav_ok = navreach > nav / 2 && hintnodes > 0;
     printf("[selftest] %s\n", (menu_png && game_png && editor_png && editor_ok && load_ok && net_ok && pie_ok &&
-                               modes_ok && zones_ok && glerr == GL_NO_ERROR) ? "PASS" : "FAIL");
+                               modes_ok && zones_ok && nav_ok && move_ok && glerr == GL_NO_ERROR) ? "PASS" : "FAIL");
     a->running = false;
 }
 
@@ -2464,6 +2608,131 @@ static void run_benchmark(App* a, int frames) {
     a->running = false;
 }
 
+/* Headless bot simulation: verifies that every bot actually moves, that the
+ * nav graph can path between arbitrary nodes, and that combat still happens.
+ * This is the test that catches "bots stand in the spawn" regressions. */
+static bool run_bottest(App* a, int seconds) {
+    if (seconds < 1) seconds = 8;
+    if (seconds > 180) seconds = 180;
+    app_start_game(a, true, a->bots + 1);
+    Game* g = a->game;
+    int n = g->num_players;
+    static float lastx[MAX_PLAYERS], lastz[MAX_PLAYERS];
+    static float travel[MAX_PLAYERS];
+    static bool have[MAX_PLAYERS], was_alive[MAX_PLAYERS];
+    static int alive_samples[MAX_PLAYERS], moved_samples[MAX_PLAYERS], stuck_samples[MAX_PLAYERS];
+    static bool navseen[MAX_NAV];
+    memset(was_alive, 0, sizeof(was_alive));
+    memset(navseen, 0, sizeof(navseen));
+    for (int i = 0; i < n; i++) {
+        lastx[i] = g->players[i].pos.x;
+        lastz[i] = g->players[i].pos.z;
+        travel[i] = 0; have[i] = true; was_alive[i] = g->players[i].alive;
+        alive_samples[i] = moved_samples[i] = stuck_samples[i] = 0;
+    }
+
+    int frames = seconds * 60;
+    for (int f = 0; f < frames; f++) {
+        app_frame(a, 1.0f / 60.0f);
+        if ((f + 1) % 60 != 0) continue;
+        for (int i = 0; i < n; i++) {
+            Player* p = &g->players[i];
+            if (!p->active || !p->alive) {
+                was_alive[i] = false;
+                have[i] = false;
+                continue;
+            }
+            if (!was_alive[i] || !have[i]) {
+                lastx[i] = p->pos.x; lastz[i] = p->pos.z;
+                was_alive[i] = true; have[i] = true;
+                continue;
+            }
+            float dx = p->pos.x - lastx[i], dz = p->pos.z - lastz[i];
+            float d = sqrtf(dx * dx + dz * dz);
+            lastx[i] = p->pos.x; lastz[i] = p->pos.z;
+            if (d > 20.0f) continue; /* respawn / teleport */
+            travel[i] += d;
+            alive_samples[i]++;
+            if (d > 0.15f) moved_samples[i]++;
+            else if (d < 0.03f) stuck_samples[i]++;
+            int node = game_nav_nearest(g, p->pos, 12.0f);
+            if (node >= 0) navseen[node] = true;
+        }
+    }
+
+    int total_alive = 0, total_moved = 0, total_stuck = 0, visited = 0;
+    int bots = 0, stuck_bots = 0, active_bots = 0;
+    float total_travel = 0;
+    for (int i = 0; i < n; i++) {
+        Player* p = &g->players[i];
+        if (!p->active) continue;
+        bots++;
+        if (p->bot) active_bots++;
+        total_alive += alive_samples[i];
+        total_moved += moved_samples[i];
+        total_stuck += stuck_samples[i];
+        total_travel += travel[i];
+        if (alive_samples[i] > 0 && travel[i] < 1.0f) stuck_bots++;
+    }
+    for (int i = 0; i < g->nav.count; i++) if (navseen[i]) visited++;
+    int nav_path_ok = 0, nav_path_try = 0, nav_path_len = 0;
+    if (g->nav.count > 4) {
+        for (int k = 0; k < 256; k++) {
+            int i = (k * 37 + 11) % g->nav.count;
+            int j = (k * 97 + 53) % g->nav.count;
+            if (i == j) continue;
+            int path[MAX_PATH], len = 0;
+            if (game_nav_path(g, i, j, path, &len) && len > 0) {
+                nav_path_ok++;
+                nav_path_len += len;
+            }
+            nav_path_try++;
+        }
+    }
+
+    float avg_travel = bots > 0 ? total_travel / bots : 0;
+    float move_pct = total_alive > 0 ? (float)total_moved * 100.0f / total_alive : 0;
+    float stuck_pct = total_alive > 0 ? (float)total_stuck * 100.0f / total_alive : 0;
+    int path_pct = nav_path_try > 0 ? nav_path_ok * 100 / nav_path_try : 100;
+    int need_nodes = g->nav.count < 80 ? g->nav.count / 4 : 20;
+    if (need_nodes < 1) need_nodes = 1;
+
+    int frags = 0, deaths = 0;
+    for (int i = 0; i < n; i++) { frags += g->players[i].frags; deaths += g->players[i].deaths; }
+
+    bool move_ok = total_alive > 0 && move_pct >= 25.0f;
+    bool dist_ok = avg_travel >= 3.0f;
+    bool nav_ok = path_pct >= 90 && visited >= need_nodes;
+    bool bots_ok = bots > 0 && active_bots == bots;
+
+    printf("[bottest] sim=%ds mode=%s players=%d bots=%d nav=%d\n",
+           seconds, game_mode_short(g->game_mode), n, bots, g->nav.count);
+    printf("[bottest] movement: avg=%.1f units/bot, moving=%.0f%%, stuck=%.0f%%, stationary_bots=%d\n",
+           avg_travel, move_pct, stuck_pct, stuck_bots);
+    printf("[bottest] nav: paths=%d/%d (%d%%), avg_len=%.1f, visited=%d/%d (need %d)\n",
+           nav_path_ok, nav_path_try, path_pct,
+           nav_path_ok ? (float)nav_path_len / nav_path_ok : 0.0f,
+           visited, g->nav.count, need_nodes);
+    printf("[bottest] combat: frags=%d deaths=%d score=%.0f:%.0f\n",
+           frags, deaths, (float)g->team_score[0], (float)g->team_score[1]);
+    for (int i = 0; i < n && i < 8; i++) {
+        Player* p = &g->players[i];
+        if (!p->active) continue;
+        printf("[bottest] slot %d %-12s travel=%.1f move=%d%% stuck=%d%% alive=%s\n",
+               i, p->name, travel[i],
+               alive_samples[i] ? moved_samples[i] * 100 / alive_samples[i] : 0,
+               alive_samples[i] ? stuck_samples[i] * 100 / alive_samples[i] : 0,
+               p->alive ? "yes" : "no");
+    }
+    bool ok = move_ok && dist_ok && nav_ok && bots_ok;
+    printf("[bottest] checks: movement=%s distance=%s navigation=%s all_bots=%s\n",
+           move_ok ? "ok" : "FAIL", dist_ok ? "ok" : "FAIL",
+           nav_ok ? "ok" : "FAIL", bots_ok ? "ok" : "FAIL");
+    printf("[bottest] %s\n", ok ? "PASS" : "FAIL");
+    a->running = false;
+    return ok;
+}
+
 /* ------------------------------------------------------------------ */
 int main(int argc, char** argv) {
     int width = 1600, height = 900;
@@ -2473,6 +2742,7 @@ int main(int argc, char** argv) {
     const char* capture = NULL;
     int capture_frame = 120;
     int benchmark = 0;
+    int bottest = 0;
     bool selftest = false;
     bool cli_host = false, cli_join = false;
     bool cli_netlog = false, cli_stats = false;
@@ -2494,6 +2764,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(s, "--capture") && i + 1 < argc) capture = argv[++i];
         else if (!strcmp(s, "--frames") && i + 1 < argc) capture_frame = atoi(argv[++i]);
         else if (!strcmp(s, "--benchmark") && i + 1 < argc) benchmark = atoi(argv[++i]);
+        else if (!strcmp(s, "--bottest") && i + 1 < argc) { bottest = atoi(argv[++i]); hidden = true; }
+        else if (!strcmp(s, "--bottest")) { bottest = 10; hidden = true; }
         else if (!strcmp(s, "--selftest")) { selftest = true; hidden = true; }
         else if (!strcmp(s, "--netlog")) cli_netlog = true;
         else if (!strcmp(s, "--stats")) cli_stats = true;
@@ -2534,6 +2806,7 @@ int main(int argc, char** argv) {
             printf("  --capture FILE         save a screenshot after --frames\n");
             printf("  --frames N             frame count for capture/benchmark\n");
             printf("  --benchmark N          benchmark N frames, then exit\n");
+            printf("  --bottest N            simulate N seconds and check bot movement/paths\n");
             printf("  --selftest             automated sanity test (hidden window)\n");
             printf("  --seconds N            quit automatically after N seconds\n");
             printf("  --netlog               print network status once per second\n");
@@ -2593,6 +2866,12 @@ int main(int argc, char** argv) {
         app_shutdown(a);
         free(a);
         return 0;
+    }
+    if (bottest > 0) {
+        bool ok = run_bottest(a, bottest);
+        app_shutdown(a);
+        free(a);
+        return ok ? 0 : 1;
     }
     if (cli_join) {
         str_copy(a->join_host, cli_join_host, sizeof(a->join_host));

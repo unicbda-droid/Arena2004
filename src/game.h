@@ -13,7 +13,7 @@
 #define MAX_EXPLOSIONS 24
 #define MAX_KILLFEED 6
 #define MAX_NAV 1600
-#define MAX_NAV_LINKS 8
+#define MAX_NAV_LINKS 12
 #define MAX_PATH 64
 #define MAX_FLAGS 2
 #define MAX_NODES 8
@@ -191,6 +191,7 @@ typedef struct {
     int nb[MAX_NAV_LINKS];
     int nn;
     int pad_landing; /* -1 or node */
+    int hint;        /* 1 = authored ACT_NAV_POINT, 0 = automatic grid node */
 } NavNode;
 
 typedef struct {

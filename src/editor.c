@@ -511,6 +511,12 @@ void editor_draw_3d(Editor* ed, Renderer* r) {
                 line_add(r, tip, v3add(a->pos, v3add(v3mul(dir, 1.7f), v3(0, 0.8f, 0))), c);
             } else if (a->type == ACT_LAVA) {
                 line_box(r, world_actor_aabb(ed->world, a), col(1.0f, 0.35f, 0.08f, 0.45f));
+            } else if (a->type == ACT_NAV_POINT) {
+                c = col(0.35f, 0.90f, 1.0f, 0.9f);
+                line_circle(r, a->pos, v3(0, 1, 0), 0.55f, c, 16);
+                line_add(r, v3add(a->pos, v3(0, -0.5f, 0)), v3add(a->pos, v3(0, 1.4f, 0)), c);
+                line_add(r, v3add(a->pos, v3(-0.4f, 0.9f, 0)), v3add(a->pos, v3(0.4f, 0.9f, 0)), c);
+                line_add(r, v3add(a->pos, v3(0, 0.9f, -0.4f)), v3add(a->pos, v3(0, 0.9f, 0.4f)), c);
             } else if (a->type == ACT_TRIGGER) {
                 c = col(0.25f, 0.95f, 0.45f, 0.8f);
                 line_box(r, world_actor_aabb(ed->world, a), col(c.r, c.g, c.b, sel ? 1.0f : 0.45f));
@@ -565,6 +571,7 @@ static const PaletteEntry PALETTE[] = {
     { "Decor Barrel", ACT_DECOR, 0, ICON_CUBE },
     { "Point Light", ACT_LIGHT, 0, ICON_LIGHT },
     { "Player Start", ACT_PLAYER_START, 0, ICON_SPAWN },
+    { "Nav Point (bot hint)", ACT_NAV_POINT, 0, ICON_SPAWN },
     { "Jump Pad", ACT_JUMPPAD, 0, ICON_JUMP },
     { "Lava Volume", ACT_LAVA, 0, ICON_LAVA },
     { "Health Vial", ACT_PICKUP, PICK_HEALTH_SMALL, ICON_PICKUP },
@@ -826,7 +833,7 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
         ui_rect(ui, rx + 10, dy, 4, 52, C_ACCENT);
         int ic = ICON_CUBE;
         if (a->type == ACT_LIGHT) ic = ICON_LIGHT;
-        else if (a->type == ACT_PLAYER_START) ic = ICON_SPAWN;
+        else if (a->type == ACT_PLAYER_START || a->type == ACT_NAV_POINT) ic = ICON_SPAWN;
         else if (a->type == ACT_PICKUP) ic = ICON_PICKUP;
         else if (a->type == ACT_JUMPPAD) ic = ICON_JUMP;
         else if (a->type == ACT_LAVA) ic = ICON_LAVA;

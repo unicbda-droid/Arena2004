@@ -132,7 +132,7 @@ bool world_move_box(World* w,Vec3* pos,Vec3* vel,float dt,float radius,float hei
 }
 
 const char* actor_type_name(int t){
-    switch(t){case ACT_BRUSH:return "Brush";case ACT_LIGHT:return "Light";case ACT_PLAYER_START:return "PlayerStart";case ACT_PICKUP:return "Pickup";case ACT_JUMPPAD:return "JumpPad";case ACT_LAVA:return "LavaVolume";case ACT_DECOR:return "Decor";case ACT_STATICMESH:return "StaticMesh";case ACT_TRIGGER:return "Trigger";default:return "Actor";}
+    switch(t){case ACT_BRUSH:return "Brush";case ACT_LIGHT:return "Light";case ACT_PLAYER_START:return "PlayerStart";case ACT_PICKUP:return "Pickup";case ACT_JUMPPAD:return "JumpPad";case ACT_LAVA:return "LavaVolume";case ACT_DECOR:return "Decor";case ACT_STATICMESH:return "StaticMesh";case ACT_TRIGGER:return "Trigger";case ACT_NAV_POINT:return "NavPoint";default:return "Actor";}
 }
 const char* pickup_name(int t){
     static const char* n[]={"Health Vial","Health Pack","Shield Small","Shield Pack","Ammo","Assault Rifle","Shock Rifle","Rocket Launcher","Flak Cannon","Lightning Gun"};
@@ -165,6 +165,7 @@ void world_actor_defaults(Actor* a,int type,int subtype){
         case ACT_DECOR: a->size=v3(1.2f,1.2f,1.2f); a->pos.y=0.6f; a->material=7; a->shape=SHAPE_CYLINDER; a->flags=FLAG_SOLID; break;
         case ACT_STATICMESH: a->size=v3(2.0f,1.6f,2.0f); a->pos.y=0.8f; a->material=0; a->shape=SHAPE_BOX; a->flags=FLAG_SOLID; break;
         case ACT_TRIGGER: a->size=v3(5.0f,4.0f,5.0f); a->pos.y=2.0f; a->shape=SHAPE_BOX; a->flags=0; a->color=col3(0.25f,0.95f,0.45f); a->power=1; a->extra=0; a->respawn=2.0f; str_copy(a->name,"say TRIGGER",MAX_NAME); break;
+        case ACT_NAV_POINT: a->size=v3(0.6f,0.6f,0.6f); a->pos.y=0.55f; a->shape=SHAPE_CYLINDER; a->flags=0; a->color=col3(0.35f,0.9f,1.0f); str_copy(a->name,"NavPoint",MAX_NAME); break;
     }
 }
 

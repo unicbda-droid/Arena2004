@@ -1303,36 +1303,8 @@ void game_nav_nearest_impl(Game* g, Vec3 pos, float maxdist, int* out, float* be
     if (bestd) *bestd = sqrtf(bd);
 }
 
-bool game_nav_path(Game* g, int start, int end, int* out, int* outlen) {
-    if (start < 0 || end < 0 || start >= g->nav.count || end >= g->nav.count) return false;
-    if (start == end) { out[0] = start; *outlen = 1; return true; }
-    static int prev[MAX_NAV];
-    static float dist[MAX_NAV];
-    static bool vis[MAX_NAV];
-    for (int i = 0; i < g->nav.count; i++) { prev[i] = -1; dist[i] = 1e30f; vis[i] = false; }
-    dist[start] = 0;
-    for (int it = 0; it < g->nav.count; it++) {
-        int u = -1; float bd = 1e30f;
-        for (int i = 0; i < g->nav.count; i++) if (!vis[i] && dist[i] < bd) { bd = dist[i]; u = i; }
-        if (u < 0) break;
-        if (u == end) break;
-        vis[u] = true;
-        for (int k = 0; k < g->nav.nodes[u].nn; k++) {
-            int v = g->nav.nodes[u].nb[k];
-            float w = v3len(v3sub(g->nav.nodes[u].pos, g->nav.nodes[v].pos));
-            if (dist[u] + w < dist[v]) { dist[v] = dist[u] + w; prev[v] = u; }
-        }
-    }
-    if (dist[end] >= 1e29f) return false;
-    int path[MAX_PATH]; int n = 0; int cur = end;
-    while (cur >= 0 && n < MAX_PATH) { path[n++] = cur; cur = prev[cur]; }
-    for (int i = 0; i < n; i++) out[i] = path[n - 1 - i];
-    *outlen = n;
-    return true;
-}
-
 /* True when the straight segment between two nav nodes is safely walkable:
- * it must not cross a lava volume and there must be floor below its midpoint. */
+ * it must not cross a lava volume and there must be floor below its samples. */
 static bool nav_link_ok(Game* g, Vec3 a, Vec3 b) {
     for (int k = 1; k <= 4; k++) {
         float t = (float)k / 5.0f;
@@ -1352,43 +1324,368 @@ static bool nav_link_ok(Game* g, Vec3 a, Vec3 b) {
     return true;
 }
 
-void game_build_nav(Game* g) {
-    g->nav.count = 0;
-    g->nav.built = 1;
-    const float step = 5.5f;
-    const float lo = -36.0f, hi = 36.0f;
-    for (float x = lo; x <= hi; x += step) {
-        for (float z = lo; z <= hi; z += step) {
-            if (g->nav.count >= MAX_NAV) break;
-            /* cast down from several heights to find walkable surfaces */
-            float heights[4] = { 3.0f, 7.0f, 12.5f, -0.5f };
-            for (int hi2 = 0; hi2 < 3; hi2++) {
-                Vec3 o = v3(x, heights[hi2], z);
-                Ray r; r.origin = o; r.dir = v3(0, -1, 0);
-                RayHit h;
-                if (!world_raycast(g->world, r, 20.0f, true, &h)) continue;
-                if (h.normal.y < 0.55f) continue;
-                float y = h.point.y;
-                if (y < -2.0f) continue;
-                /* clearance box */
-                AABB box = aabb_center_size(v3(x, y + 1.0f, z), v3(1.3f, 2.0f, 1.3f));
-                if (world_overlap_box(g->world, box, -1)) continue;
-                /* dedupe near nodes */
-                bool dup = false;
-                for (int k = 0; k < g->nav.count; k++) {
-                    Vec3 d = v3sub(g->nav.nodes[k].pos, v3(x, y + 0.95f, z));
-                    if (v3dot(d, d) < 2.2f * 2.2f) { dup = true; break; }
-                }
-                if (dup) continue;
-                NavNode* n = &g->nav.nodes[g->nav.count++];
-                memset(n, 0, sizeof(*n));
-                n->pos = v3(x, y + 0.95f, z);
-                n->pad_landing = -1;
-                break;
+/* Wall-free + walkable check used by link building and path smoothing. */
+static bool nav_segment_ok(Game* g, Vec3 a, Vec3 b) {
+    Vec3 d = v3sub(b, a);
+    float dist = v3len(d);
+    if (dist < 0.05f) return true;
+    Vec3 dir = v3mul(d, 1.0f / dist);
+    Ray r; r.origin = v3add(a, v3(0, 0.1f, 0)); r.dir = dir;
+    RayHit h;
+    if (world_raycast(g->world, r, dist - 0.35f, true, &h)) return false;
+    return nav_link_ok(g, a, b);
+}
+
+static float nav_heuristic(Game* g, int a, int b) {
+    return v3len(v3sub(g->nav.nodes[b].pos, g->nav.nodes[a].pos));
+}
+
+/* A* over the nav graph, then string-pull the result so bots do not zig-zag
+ * from grid node to grid node. */
+bool game_nav_path(Game* g, int start, int end, int* out, int* outlen) {
+    if (start < 0 || end < 0 || start >= g->nav.count || end >= g->nav.count) return false;
+    if (start == end) { out[0] = start; *outlen = 1; return true; }
+
+    static int prev[MAX_NAV];
+    static float gscore[MAX_NAV], fscore[MAX_NAV];
+    static bool open[MAX_NAV], closed[MAX_NAV];
+    for (int i = 0; i < g->nav.count; i++) {
+        prev[i] = -1; gscore[i] = 1e30f; fscore[i] = 1e30f;
+        open[i] = false; closed[i] = false;
+    }
+    gscore[start] = 0;
+    fscore[start] = nav_heuristic(g, start, end);
+    open[start] = true;
+    int open_count = 1;
+
+    for (int it = 0; it < g->nav.count && open_count > 0; it++) {
+        int u = -1; float best = 1e30f;
+        for (int i = 0; i < g->nav.count; i++)
+            if (open[i] && fscore[i] < best) { best = fscore[i]; u = i; }
+        if (u < 0) break;
+        if (u == end) break;
+        open[u] = false; open_count--;
+        closed[u] = true;
+        for (int k = 0; k < g->nav.nodes[u].nn; k++) {
+            int v = g->nav.nodes[u].nb[k];
+            if (v < 0 || v >= g->nav.count || closed[v]) continue;
+            float w = v3len(v3sub(g->nav.nodes[u].pos, g->nav.nodes[v].pos));
+            float tentative = gscore[u] + w;
+            if (tentative < gscore[v]) {
+                prev[v] = u;
+                gscore[v] = tentative;
+                fscore[v] = tentative + nav_heuristic(g, v, end);
+                if (!open[v]) { open[v] = true; open_count++; }
             }
         }
     }
-    /* links */
+    if (gscore[end] >= 1e29f) return false;
+
+    int raw[MAX_PATH]; int n = 0; int cur = end;
+    while (cur >= 0 && n < MAX_PATH) { raw[n++] = cur; cur = prev[cur]; }
+    int tmp[MAX_PATH];
+    for (int i = 0; i < n; i++) tmp[i] = raw[n - 1 - i];
+
+    int m = 0, i = 0;
+    while (i < n && m < MAX_PATH) {
+        out[m++] = tmp[i];
+        if (i == n - 1) break;
+        int j = n - 1;
+        while (j > i + 1) {
+            if (nav_segment_ok(g, g->nav.nodes[tmp[i]].pos, g->nav.nodes[tmp[j]].pos)) break;
+            j--;
+        }
+        i = (j > i + 1) ? j : i + 1;
+    }
+    *outlen = m;
+    return true;
+}
+
+/* Bounds and grid resolution come from the map itself, so editor-made maps
+ * and stacked floors work without hand-placed path nodes. */
+static void nav_world_bounds(Game* g, float* minx, float* maxx, float* minz, float* maxz,
+                             float* miny, float* maxy) {
+    float ax = 1e9f, bx = -1e9f, az = 1e9f, bz = -1e9f, ay = 1e9f, by = -1e9f;
+    for (int i = 0; i < g->world->count; i++) {
+        Actor* a = &g->world->actors[i];
+        if (a->type == ACT_LIGHT || a->type == ACT_TRIGGER) continue;
+        AABB bb = world_actor_aabb(g->world, a);
+        if (bb.min.x < ax) ax = bb.min.x;
+        if (bb.max.x > bx) bx = bb.max.x;
+        if (bb.min.z < az) az = bb.min.z;
+        if (bb.max.z > bz) bz = bb.max.z;
+        if (bb.min.y < ay) ay = bb.min.y;
+        if (bb.max.y > by) by = bb.max.y;
+    }
+    if (ax > bx - 1.0f || az > bz - 1.0f) {
+        ax = -36.0f; bx = 36.0f; az = -36.0f; bz = 36.0f;
+        ay = -4.0f; by = 14.0f;
+    }
+    /* keep very large editor maps bounded; the grid step grows instead */
+    if (bx - ax > 400.0f) { float c = (ax + bx) * 0.5f; ax = c - 200.0f; bx = c + 200.0f; }
+    if (bz - az > 400.0f) { float c = (az + bz) * 0.5f; az = c - 200.0f; bz = c + 200.0f; }
+    *minx = ax - 2.0f; *maxx = bx + 2.0f;
+    *minz = az - 2.0f; *maxz = bz + 2.0f;
+    *miny = ay - 4.0f; *maxy = by + 1.5f;
+}
+
+static int nav_add_node(Game* g, Vec3 pos, float dedupe) {
+    if (g->nav.count >= MAX_NAV) return -1;
+    for (int k = 0; k < g->nav.count; k++) {
+        Vec3 d = v3sub(g->nav.nodes[k].pos, pos);
+        if (v3dot(d, d) < dedupe * dedupe) return k;
+    }
+    int idx = g->nav.count++;
+    NavNode* n = &g->nav.nodes[idx];
+    memset(n, 0, sizeof(*n));
+    n->pos = pos;
+    n->pad_landing = -1;
+    return idx;
+}
+
+/* Make room for a jump-pad edge on a fully linked grid node. */
+static bool nav_drop_farthest(Game* g, int idx) {
+    NavNode* a = &g->nav.nodes[idx];
+    if (a->nn <= 0) return false;
+    int worst = 0; float wd = -1.0f;
+    for (int k = 0; k < a->nn; k++) {
+        float d = v3len(v3sub(g->nav.nodes[a->nb[k]].pos, a->pos));
+        if (d > wd) { wd = d; worst = k; }
+    }
+    int v = a->nb[worst];
+    for (int k = worst; k < a->nn - 1; k++) a->nb[k] = a->nb[k + 1];
+    a->nn--;
+    NavNode* b = &g->nav.nodes[v];
+    for (int k = 0; k < b->nn; k++) {
+        if (b->nb[k] == idx) {
+            for (int j = k; j < b->nn - 1; j++) b->nb[j] = b->nb[j + 1];
+            b->nn--;
+            break;
+        }
+    }
+    return true;
+}
+
+/* One-way links from jump pads to the first nav node along their arc. */
+static void nav_link_jumppads(Game* g) {
+    for (int i = 0; i < g->world->count; i++) {
+        Actor* pad = &g->world->actors[i];
+        if (pad->type != ACT_JUMPPAD) continue;
+        int src = game_nav_nearest(g, v3(pad->pos.x, pad->pos.y + 0.4f, pad->pos.z), 4.0f);
+        if (src < 0) continue;
+        float yaw = pad->yaw * DEG2RAD;
+        Vec3 dir = v3(sinf(yaw), 0, -cosf(yaw));
+        Vec3 p = g->nav.nodes[src].pos;
+        Vec3 vel = v3add(v3mul(dir, pad->power), v3(0, pad->extra, 0));
+        int dst = -1;
+        for (int s = 1; s <= 80; s++) {
+            float t = (float)s * 0.05f;
+            Vec3 q = v3add(v3add(p, v3mul(vel, t)), v3(0, -0.5f * g->gravity * t * t, 0));
+            float dx = q.x - p.x, dz = q.z - p.z;
+            if (t > 0.30f && dx * dx + dz * dz > 16.0f) {
+                int n = game_nav_nearest(g, q, 2.8f);
+                if (n >= 0 && n != src) { dst = n; break; }
+            }
+            if (q.y < p.y - 6.0f) break;
+        }
+        if (dst < 0) continue;
+        bool already = false;
+        for (int k = 0; k < g->nav.nodes[src].nn; k++)
+            if (g->nav.nodes[src].nb[k] == dst) { already = true; break; }
+        if (!already) {
+            if (g->nav.nodes[src].nn >= MAX_NAV_LINKS) nav_drop_farthest(g, src);
+            if (g->nav.nodes[src].nn < MAX_NAV_LINKS) {
+                g->nav.nodes[src].nb[g->nav.nodes[src].nn++] = dst;
+                g->nav.nodes[src].pad_landing = dst;
+            }
+        }
+    }
+}
+
+static bool nav_has_link(Game* g, int i, int j) {
+    NavNode* a = &g->nav.nodes[i];
+    for (int k = 0; k < a->nn; k++) if (a->nb[k] == j) return true;
+    return false;
+}
+
+/* Add a bidirectional edge, making room on already saturated nodes. */
+static bool nav_add_link(Game* g, int i, int j) {
+    if (i < 0 || j < 0 || i == j) return false;
+    if (i >= g->nav.count || j >= g->nav.count) return false;
+    if (nav_has_link(g, i, j)) return false;
+    if (g->nav.nodes[i].nn >= MAX_NAV_LINKS) nav_drop_farthest(g, i);
+    if (g->nav.nodes[j].nn >= MAX_NAV_LINKS) nav_drop_farthest(g, j);
+    if (g->nav.nodes[i].nn >= MAX_NAV_LINKS || g->nav.nodes[j].nn >= MAX_NAV_LINKS) return false;
+    g->nav.nodes[i].nb[g->nav.nodes[i].nn++] = j;
+    g->nav.nodes[j].nb[g->nav.nodes[j].nn++] = i;
+    return true;
+}
+
+/* Authored nav points (ACT_NAV_POINT) are UT-style hints. They snap to the
+ * floor below them; a hint that cannot find ground is ignored so a misplaced
+ * point never creates an unreachable floating node. */
+static void nav_add_hint_nodes(Game* g) {
+    for (int i = 0; i < g->world->count && g->nav.count < MAX_NAV; i++) {
+        Actor* a = &g->world->actors[i];
+        if (a->type != ACT_NAV_POINT) continue;
+        Ray r; r.origin = v3add(a->pos, v3(0, 0.6f, 0)); r.dir = v3(0, -1, 0);
+        RayHit h;
+        if (!world_raycast(g->world, r, 8.0f, true, &h)) continue;
+        if (h.normal.y < 0.5f) continue;
+        int idx = nav_add_node(g, v3add(h.point, v3(0, 0.95f, 0)), 1.4f);
+        if (idx >= 0) g->nav.nodes[idx].hint = 1;
+    }
+}
+
+/* Bridge hint nodes with each other and anchor each one to the automatic
+ * graph. The hint radius is deliberately larger than the grid link radius:
+ * mappers use these points exactly where the raw geometry scan is too coarse
+ * (stairs, ledges, narrow doorways). */
+static void nav_link_hints(Game* g) {
+    if (g->nav.count < 2) return;
+
+    for (int i = 0; i < g->nav.count; i++) {
+        NavNode* a = &g->nav.nodes[i];
+        if (!a->hint) continue;
+        for (int j = i + 1; j < g->nav.count; j++) {
+            NavNode* b = &g->nav.nodes[j];
+            if (!b->hint) continue;
+            float dist = v3len(v3sub(b->pos, a->pos));
+            if (dist > 28.0f) continue;
+            if (!nav_segment_ok(g, a->pos, b->pos)) continue;
+            nav_add_link(g, i, j);
+        }
+    }
+
+    for (int i = 0; i < g->nav.count; i++) {
+        NavNode* a = &g->nav.nodes[i];
+        if (!a->hint) continue;
+        bool anchored = false;
+        for (int k = 0; k < a->nn && !anchored; k++) {
+            int j = a->nb[k];
+            if (j >= 0 && j < g->nav.count && !g->nav.nodes[j].hint) anchored = true;
+        }
+        if (anchored) continue;
+        int best = -1; float bestd = 1e30f;
+        for (int j = 0; j < g->nav.count; j++) {
+            NavNode* b = &g->nav.nodes[j];
+            if (b->hint) continue;
+            Vec3 d = v3sub(b->pos, a->pos);
+            float dist = v3len(d);
+            if (dist > 18.0f || dist >= bestd) continue;
+            if (!nav_segment_ok(g, a->pos, b->pos)) continue;
+            best = j; bestd = dist;
+        }
+        if (best >= 0) nav_add_link(g, i, best);
+    }
+}
+
+/* Keep the largest walkable island plus any island that contains an authored
+ * hint. Roof/pillar tops and other decorative surfaces that no player can
+ * reach would only attract bots into dead ends, but a hint island is
+ * intentional and must survive pruning. */
+static void nav_prune_islands(Game* g) {
+    int n = g->nav.count;
+    if (n <= 0) return;
+    static int parent[MAX_NAV], size_[MAX_NAV], remap[MAX_NAV];
+    static bool keep[MAX_NAV];
+    for (int i = 0; i < n; i++) { parent[i] = i; size_[i] = 1; remap[i] = -1; keep[i] = false; }
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < g->nav.nodes[i].nn; k++) {
+            int j = g->nav.nodes[i].nb[k];
+            if (j < 0 || j >= n) continue;
+            int a = i, b = j;
+            while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+            while (parent[b] != b) { parent[b] = parent[parent[b]]; b = parent[b]; }
+            if (a != b) {
+                if (size_[a] < size_[b]) { int t = a; a = b; b = t; }
+                parent[b] = a;
+                size_[a] += size_[b];
+            }
+        }
+    }
+    int best = 0, bestn = 0;
+    for (int i = 0; i < n; i++) {
+        int r = i;
+        while (parent[r] != r) r = parent[r];
+        if (size_[r] > bestn) { bestn = size_[r]; best = r; }
+    }
+    if (bestn <= 0) return;
+    keep[best] = true;
+    for (int i = 0; i < n; i++) {
+        if (!g->nav.nodes[i].hint) continue;
+        int r = i;
+        while (parent[r] != r) r = parent[r];
+        keep[r] = true;
+    }
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        int r = i;
+        while (parent[r] != r) r = parent[r];
+        if (!keep[r]) continue;
+        remap[i] = m;
+        if (m != i) g->nav.nodes[m] = g->nav.nodes[i];
+        m++;
+    }
+    for (int i = 0; i < m; i++) {
+        NavNode* node = &g->nav.nodes[i];
+        int nn = 0;
+        for (int k = 0; k < node->nn; k++) {
+            int old = node->nb[k];
+            if (old >= 0 && old < n && remap[old] >= 0) node->nb[nn++] = remap[old];
+        }
+        node->nn = nn;
+        if (node->pad_landing >= 0 && node->pad_landing < n)
+            node->pad_landing = remap[node->pad_landing];
+        else
+            node->pad_landing = -1;
+    }
+    g->nav.count = m;
+}
+
+void game_build_nav(Game* g) {
+    g->nav.count = 0;
+    g->nav.built = 1;
+
+    float minx, maxx, minz, maxz, miny, maxy;
+    nav_world_bounds(g, &minx, &maxx, &minz, &maxz, &miny, &maxy);
+    float area = (maxx - minx) * (maxz - minz);
+    float step = sqrtf(area / 1100.0f);
+    if (step < 3.0f) step = 3.0f;
+    if (step > 8.0f) step = 8.0f;
+    float dedupe = fmaxf(1.6f, step * 0.55f);
+
+    /* Scan each column from the top down, so catwalks and upper floors are
+     * found as well as the main deck. */
+    for (float x = minx; x <= maxx && g->nav.count < MAX_NAV; x += step) {
+        for (float z = minz; z <= maxz && g->nav.count < MAX_NAV; z += step) {
+            float y = maxy;
+            for (int level = 0; level < 12 && g->nav.count < MAX_NAV; level++) {
+                Vec3 o = v3(x, y, z);
+                Ray r; r.origin = o; r.dir = v3(0, -1, 0);
+                RayHit h;
+                float reach = (y - miny) + 2.0f;
+                if (reach < 0.5f) break;
+                if (!world_raycast(g->world, r, reach, true, &h)) break;
+                float fy = h.point.y;
+                if (h.normal.y >= 0.55f && fy > miny - 1.0f) {
+                    AABB box = aabb_center_size(v3(x, fy + 1.0f, z), v3(1.3f, 2.0f, 1.3f));
+                    if (!world_overlap_box(g->world, box, -1))
+                        nav_add_node(g, v3(x, fy + 0.95f, z), dedupe);
+                }
+                y = fy - 1.4f;
+                if (y < miny) break;
+            }
+        }
+    }
+
+    /* optional authored hints join the grid before linking */
+    nav_add_hint_nodes(g);
+
+    /* links: short, walkable, wall-free segments */
+    float linkdist = fmaxf(step * 2.2f, 8.0f);
+    if (linkdist > 14.0f) linkdist = 14.0f;
+    float linky = fmaxf(2.6f, step * 0.8f);
     for (int i = 0; i < g->nav.count; i++) {
         NavNode* a = &g->nav.nodes[i];
         for (int j = i + 1; j < g->nav.count; j++) {
@@ -1396,18 +1693,19 @@ void game_build_nav(Game* g) {
             if (a->nn >= MAX_NAV_LINKS || b->nn >= MAX_NAV_LINKS) continue;
             Vec3 d = v3sub(b->pos, a->pos);
             float dist = v3len(d);
-            if (dist > 12.5f) continue;
-            if (fabsf(d.y) > 2.6f) continue;
-            Vec3 dir = v3mul(d, 1.0f / dist);
-            Ray r; r.origin = v3add(a->pos, v3(0, 0.1f, 0)); r.dir = dir;
-            RayHit h;
-            if (world_raycast(g->world, r, dist - 0.4f, true, &h)) continue;
-            if (!nav_link_ok(g, a->pos, b->pos)) continue;
+            if (dist > linkdist) continue;
+            if (fabsf(d.y) > linky) continue;
+            if (!nav_segment_ok(g, a->pos, b->pos)) continue;
             a->nb[a->nn++] = j;
             b->nb[b->nn++] = i;
         }
     }
-    /* fallback: spawn nodes if too few */
+
+    nav_link_hints(g);
+    nav_link_jumppads(g);
+    nav_prune_islands(g);
+
+    /* fallback: spawn nodes if the map has too little walkable geometry */
     if (g->nav.count < 12) {
         for (int i = 0; i < g->world->count && g->nav.count < MAX_NAV; i++) {
             Actor* a = &g->world->actors[i];

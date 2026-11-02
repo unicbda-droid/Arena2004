@@ -3,7 +3,7 @@
 CC       ?= cc
 PKG_CONFIG ?= pkg-config
 CFLAGS   ?= -O2
-CFLAGS   += -std=c11 -Wall -Wextra -Isrc $(shell $(PKG_CONFIG) --cflags sdl2 glew)
+CFLAGS   += -std=c11 -Wall -Wextra -Isrc -MMD -MP $(shell $(PKG_CONFIG) --cflags sdl2 glew)
 UNAME_S  := $(shell uname -s 2>/dev/null)
 ifeq ($(UNAME_S),Darwin)
   LDLIBS += $(shell $(PKG_CONFIG) --libs sdl2 glew) -lpng -lm -framework OpenGL
@@ -15,6 +15,9 @@ endif
 GAME_SRC := src/gl_util.c src/ui.c src/world.c src/render.c src/game.c \
             src/hud.c src/audio.c src/editor.c src/net.c src/console.c src/steam_bridge.c src/main.c
 GAME_OBJ := $(GAME_SRC:src/%.c=build/%.o)
+GAME_DEP := $(GAME_OBJ:.o=.d)
+LOB_OBJ  := build/lobby.o
+LOB_DEP  := build/lobby.d
 
 all: arena2004 arena2004_lobby
 
@@ -45,5 +48,7 @@ lobby: arena2004_lobby
 
 clean:
 	rm -rf build arena2004 arena2004_lobby
+
+-include $(GAME_DEP) $(LOB_DEP)
 
 .PHONY: all debug run selftest lobby clean

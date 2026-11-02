@@ -17,6 +17,8 @@ Enthalten sind:
   `DM-Rankin` (kompakte Symmetrie-Arena mit zentraler Plattform)
 * **UE3-artiger Level-Editor** mit Content-Browser, Details-Panel, Gizmos,
   Grid/Snap, Undo/Redo, Map-Speichern und **Play-in-Editor (PIE)**
+* **Bots mit hybrider Navigation**: automatischer Nav-Graph aus der Map plus
+  optionale Unreal-artige `NavPoint`-Hinweise; A*, String-Pulling, Jump-Pads
 * **Online-Spiel**: direkte LAN-Verbindung per IP oder NAT-freundlich über
   Lobby-Server mit 4-stelligem Raumcode, inkl. Passwortschutz
 * **Gothic-/Quake-Konsole** mit Autovervollständigung, History, Scrollback und
@@ -83,8 +85,8 @@ Push Linux-, macOS- und Windows-Artefakte. Ein Tag startet zusätzlich einen
 Release-Job, der die drei ZIPs automatisch an das GitHub-Release anhängt:
 
 ```bash
-git tag v0.9.0
-git push origin v0.9.0
+git tag v0.9.1
+git push origin v0.9.1
 ```
 
 Dieselben Pakete dienen als Steam-Depot-Inhalt (`steam/README.md`).
@@ -150,7 +152,7 @@ Auswahl wird sofort geladen und gilt für Demo-Match, Online-Spiel und Editor.
 | `ONSLAUGHT` | Onslaught | 3 Control Nodes halten, dann den Power Core zerstören |
 | `CONQUEST` | Conquest (Battlefield) | 5 Capture Points halten, Tickets abbauen |
 | `RPG` | RPG | Level/XP, höhere HP und Schaden pro Level |
-| `BR` | Battle Royale | shrinking Zone, letzter Überlebender gewinnt |
+| `BR` | Battle Royale | Fortnite/H1Z1-artige shrinking Zone, letzter Überlebender gewinnt |
 
 Modus im Menü über **MODE `<` / `>`** wählen oder per Konsole/CLI:
 
@@ -167,6 +169,44 @@ In `VCTF` und auf Wunsch per `vehicle [team]` stehen drei Fahrzeugtypen bereit:
 **Scorpion** (schnell, leicht), **Manta** (wendig, Flug) und **Goliath** (schwer,
 viel HP). Mit `E` steigt man in der Nähe ein und wieder aus; Fahrzeuge schießen
 mit Primärfeuer und haben eigene HP.
+
+---
+
+## Bot-Navigation: automatisch + optionale Unreal-Punkte
+
+Die Bots nutzen eine **Hybrid-Navigation**. Empfehlung: automatische Berechnung
+als Basis, `NavPoint`-Actor nur als Korrektur für Stellen, die die Geometrie-
+Analyse nicht sauber erkennt.
+
+**Automatisch (Counter-Strike-artig):**
+
+* Der Nav-Graph wird beim Matchstart aus der Map-Geometrie gebaut: Spalten-
+  Raycasts finden Böden, Catwalks und mehrere Etagen.
+* Adaptive Grid-Größe und dynamische Map-Grenzen funktionieren auch für
+  Editor-Maps ohne manuelle Pfadpunkte.
+* A* mit String-Pulling verhindert Zickzack-Laufen; Lava, Wände und Abstürze
+  werden geprüft.
+* Jump-Pads erhalten gerichtete Links entlang ihrer Flugbahn.
+* Die größte zusammenhängende Insel bleibt erhalten, damit Bots nicht auf
+  Dächern oder Zierflächen stranden.
+
+**Optional (Unreal-artig):**
+
+* `ACT_NAV_POINT` im Editor platzieren oder per Konsole `spawn navpoint`.
+* Der Punkt rastet auf den Boden darunter ein und überbrückt engere Stellen
+  mit größerem Link-Radius.
+* Hinweis-Inseln werden beim Pruning geschützt.
+
+Konsole:
+
+```text
+nav                 # Knoten, Links, vertikale Links, isolierte Knoten, Hinweise
+nav rebuild         # nach Map-Änderungen neu berechnen
+spawn navpoint      # UT-artigen Pfadhinweis setzen
+```
+
+`NAV` zeigt zusätzlich `Hinweis-Punkte`. Im Selftest muss der Graph erreichbar
+sein, und platzierte NavPoints müssen als Knoten überleben.
 
 ---
 
@@ -190,11 +230,11 @@ Die Match-Größe lässt sich im Menü (**SCALE**) oder per Konsole/CLI setzen:
   Populationen werden statistisch geführt.
 * Konsole: `scale 64v64`, `mega 10000`, `zones`, `zone 3`, `channels`,
   `channel 1`. Das HUD zeigt aktive Zone, Channel und Gesamtpopulation.
-* Netzwerk-Runden bleiben bewusst klein (max. 8 Peers pro Raum); die
-  Mega-Zonen dienen als Server-/Community-Simulation und für große Bot-Matches.
-
-Hinweis: Die Netzwerk-Snapshots sind auf 8 Spieler begrenzt (`PKT_MAX_PLAYERS`),
-damit UDP-Pakete klein und Latenzen niedrig bleiben.
+* **Listen-Server: bis zu 32 Spieler** (Host + 31 Bots/Clients, UT2004-Niveau).
+  Snapshots werden automatisch in mehrere UDP-Chunks aufgeteilt, damit jedes
+  Paket unter 1200 Byte bleibt.
+* Die Mega-Zonen (bis 30.000) dienen als Server-/Community-Simulation und für
+  große Bot-Matches; 1.000 Spieler werden lokal vollständig simuliert.
 
 ---
 
@@ -267,7 +307,7 @@ einen Port weiterleiten.
 
 Im Menü gibt es dafür **JOIN GAME → USE LOBBY CODE**.
 
-Der Lobby-Server unterstützt bis zu 64 Räume und 8 Spieler pro Raum. Er ist
+Der Lobby-Server unterstützt bis zu 64 Räume und 32 Spieler pro Raum. Er ist
 absichtlich dependency-frei und kann auch als systemd-Dienst laufen.
 
 ### Passwortschutz
@@ -315,13 +355,14 @@ in Gothic/Quake/RTCW:
 --scale N|5v5|32v32    Matchgröße (bis 30000 Spieler/Zonen)
 --password PW          Host-Passwort / Zugangskontrolle
 --joinpassword PW      Passwort beim Beitreten
---bots N               Anzahl Bots (bis 999; große Werte = Scale)
+--bots N               Anzahl Bots (bis 999; große Werte = Scale, Listen-Server max. 31)
 --seconds N            nach N Sekunden automatisch beenden
 --netlog               Netzwerkstatus jede Sekunde ausgeben
 --stats                Match-Statistik beim Beenden ausgeben
 --capture FILE         Screenshot nach --frames speichern
 --frames N             Framezahl für Capture
 --benchmark N          N Frames rendern und FPS ausgeben
+--bottest N            N Sekunden Bot-Simulation mit Bewegungs-/Pfad-Checks
 --selftest             automatischer Engine-/Game-/Editor-Test
 --width N --height N   Fenstergröße
 --hidden               unsichtbares Fenster (für Tests)
@@ -365,6 +406,8 @@ steam/            App-/Depot-VDF-Vorlagen, Achievements, Anleitung
 assets/fonts/     DejaVu-Fonts für die UI
 maps/             Text-Maps (DM-Deck17, DM-Rankin)
 tests/net_test.sh End-to-End-Netzwerktest
+tests/listen_test.sh 32-Spieler-Listen-Server + gechunkte Snapshots
+tests/bot_test.sh  Bot-/Simulationsmatrix inkl. 1k-BR
 ```
 
 ---
@@ -374,17 +417,20 @@ tests/net_test.sh End-to-End-Netzwerktest
 * OpenGL **3.3 Core Profile**, GLSL 330, GLEW, SDL2
 * Renderpfad: HDR-Framebuffer → Bright-Pass → separabler Blur → ACES-Composite
 * Kollision: AABB-/Brush-/Rampen-/Zylinder-Volumen mit Sweep-Auflösung
-* Bots: Nav-Graph auf Basis der Map-Actors, A*-Pfadfindung, Zielwahl,
-  Aim-Fehler, Strafe-/Dodge-Verhalten, Waffenpräferenzen und Kantenschutz
-  (Bots laufen nicht in Lava oder über Absätze); unerreichbare Ziele werden
-  über erreichbare Nav-Knoten umgangen
+* Bots: hybride Navigation aus automatischem Nav-Graph plus optionalen
+  `ACT_NAV_POINT`-Hinweisen; A* mit String-Pulling, Jump-Pad-Links, Multi-Floor-
+  Scan, Kantenschutz und Island-Pruning. Dazu Zielwahl, Aim-Fehler,
+  Strafe-/Dodge-Verhalten und Waffenpräferenzen. `--bottest N` simuliert
+  kopflos und prüft Bewegung, Pfade und steckengebliebene Bots.
 * Große Matches: lokale Simulation bis 1000 Spieler; darüber statistische
   Zonen/Channels mit LOD-KI. Nur die aktive Zone wird vollständig simuliert.
-* Battle Royale: shrinking Zone mit Schadens-Ticks außerhalb des Kreises
+* Battle Royale: Fortnite/H1Z1-artige Zone mit 6 Schrumpfstufen und
+  Schadens-Ticks außerhalb des Kreises; Bots fliehen aktiv ins Zentrum
 * RPG: XP/Level pro Session, höhere Max-HP und Schadensmultiplikatoren
-* Netzwerk: eigenes kleines UDP-Protokoll (`src/netproto.h`) mit Sequenznummern,
+* Netzwerk: eigenes UDP-Protokoll (`src/netproto.h`) mit Sequenznummern,
   Snapshots (20 Hz), Client-Inputs (30 Hz), Ping/Pong, Passwort-Handshake und
-  Timeouts. Netzwerk-Peers sind auf 8 begrenzt; Mega-Zonen sind lokal/statistisch.
+  Timeouts. Bis zu 32 Spieler pro Listen-Server; Snapshots werden gechunkt.
+  Beitretende Menschen übernehmen bei vollem Server einen Bot-Slot.
 * Alle Sounds und Musik werden zur Laufzeit synthetisiert
 * Screenshots werden per `glReadPixels` und libpng geschrieben
 * Steam ist optional: `src/steam_bridge.c` lädt `steam_api` dynamisch; ohne
@@ -395,7 +441,10 @@ tests/net_test.sh End-to-End-Netzwerktest
 ```bash
 make -j$(nproc)
 ./arena2004 --selftest                 # PASS (inkl. aller 9 Modi, 256/30000-Scale)
+./arena2004 --bottest 12               # PASS (Bots bewegen sich, A* findet Pfade)
 tests/net_test.sh                      # PASS (Lobby, Raumcode, Passwort, Modus)
+tests/listen_test.sh                   # PASS (21 Spieler, gechunkte Snapshots)
+tests/bot_test.sh                      # PASS (alle Modi, 1k-BR, 30k-Zone)
 ./arena2004 --hidden --demo --seconds 60 --stats
 ./arena2004 --hidden --demo --mode br --scale 500 --seconds 60 --stats
 ./arena2004 --map maps/DM-Rankin.map --hidden --demo --seconds 30 --stats
@@ -406,15 +455,18 @@ Der Selftest prüft Menü-, Spiel-, Editor- und PIE-Rendering (inkl. PNG-Export)
 Map-Speichern/-Laden, Netzwerk-Socket, Audio sowie alle Spielmodi und die
 Zonen-/Channel-Konfiguration bis 30.000 Spieler. Der Netzwerktest startet den
 Lobby-Server, registriert einen Host mit Raumcode, testet falsche und richtige
-Passwörter und verbindet einen Client über den Relay. Zusätzlich wurde der
-Selftest unter AddressSanitizer/UBSan ohne Befunde ausgeführt.
+Passwörter und verbindet einen Client über den Relay. `listen_test.sh` prüft
+den 32-Spieler-Listen-Server mit gechunkten Snapshots. `bot_test.sh` simuliert
+alle Modi, 128v128, 1.000er-BR und die 30.000er-Zone. Der Selftest prüft
+zusätzlich die lokale Spielerbewegung (WASD/Achsen) und die Bot-Navigation.
+Zusätzlich wurde der Selftest unter AddressSanitizer/UBSan ausgeführt.
 
 ## GitHub und Steam
 
 Das Projekt ist so vorbereitet, dass derselbe Quellcode auf GitHub und Steam
 veröffentlicht werden kann:
 
-* **GitHub**: Repository anlegen, `git push`, Tag `v0.9.0` setzen – der Workflow
+* **GitHub**: Repository anlegen, `git push`, Tag `v0.9.1` setzen – der Workflow
   baut Linux/macOS/Windows-ZIPs als Artefakte.
 * **Steam**: AppID/DepotIDs in `steam/*.vdf` eintragen, `scripts/package.sh`
   ausführen, dann `STEAM_USER=... scripts/steam_upload.sh`. Details stehen in
@@ -426,9 +478,10 @@ veröffentlicht werden kann:
 Das Projekt ist eine eigenständige Hommage, kein Unreal-Engine-Port. Es gibt
 keinen BSP-/CSG-Brush-Editor, kein UnrealScript und keine Original-UT-Assets.
 Die Netzwerk-Synchronisation ist bewusst einfach (Host-autoritative Snapshots
-mit lokaler Prädiktion) und für kleine Arena-Runden ausgelegt. Populationen
-über 1000 Spieler sind statistische Zonen, keine echte 1:1-Simulation jedes
-Spielers. Steamworks-Features (Achievements, Cloud, Lobby) sind vorbereitet,
+mit lokaler Prädiktion) und auf 32 Spieler pro Listen-Server ausgelegt.
+1.000 Spieler laufen lokal vollständig; Populationen darüber sind statistische
+Zonen/Channels, keine echte 1:1-Simulation jedes Spielers. Für echte
+1000er-Netzwerkrunden wäre Server-Meshing/Sharding der nächste Schritt. Steamworks-Features (Achievements, Cloud, Lobby) sind vorbereitet,
 aber ohne SDK nicht aktiv.
 
 Viel Spaß in der Arena!

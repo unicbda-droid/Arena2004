@@ -316,7 +316,7 @@ void renderer_draw_world_static(Renderer* r,World* w){
     shader_uniform1i(r->prog_scene,"uViewmodel",0);
     for(int i=0;i<w->count;i++){
         Actor* a=&w->actors[i];
-        if(a->type==ACT_TRIGGER||a->type==ACT_LIGHT||a->type==ACT_PLAYER_START||a->type==ACT_PICKUP||a->type==ACT_JUMPPAD||a->type==ACT_LAVA) continue;
+        if(a->type==ACT_TRIGGER||a->type==ACT_LIGHT||a->type==ACT_PLAYER_START||a->type==ACT_PICKUP||a->type==ACT_JUMPPAD||a->type==ACT_LAVA||a->type==ACT_NAV_POINT) continue;
         if(!(a->flags&FLAG_SOLID)&&a->type==ACT_BRUSH&&a->shape==SHAPE_BOX) { /* non-solid decoration still drawn */ }
         float tint=0.92f+0.16f*hash01((uint32_t)(i*2654435761u));
         Color c=col_mul(a->color,tint);

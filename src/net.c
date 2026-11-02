@@ -254,6 +254,13 @@ static void host_add_player(Net* n, Game* g, const PktHello* hello, const struct
     for (int i = 1; i < PKT_MAX_PLAYERS; i++) {
         if (!n->remote_alive[i]) { slot = i; break; }
     }
+    /* Listen-server etiquette: a human joining a full bot match takes over a
+     * bot slot instead of being rejected. */
+    if (slot < 0) {
+        for (int i = 1; i < PKT_MAX_PLAYERS; i++) {
+            if (i < g->num_players && g->players[i].active && g->players[i].bot) { slot = i; break; }
+        }
+    }
     if (slot < 0) return;
     if (slot >= g->num_players) g->num_players = slot + 1;
     n->remote_alive[slot] = true;
@@ -389,13 +396,29 @@ void net_poll(Net* n, Game* g, float dt) {
             if (n->role == NET_ROLE_CLIENT && plen >= (int)sizeof(PktSnapHead)) {
                 PktSnapHead* sh = (PktSnapHead*)payload;
                 int cnt = sh->count;
+                int start = sh->start;
+                int total = sh->total;
+                if (cnt < 0) cnt = 0;
                 if (cnt > PKT_MAX_PLAYERS) cnt = PKT_MAX_PLAYERS;
-                if (plen >= (int)(sizeof(PktSnapHead) + cnt * sizeof(PktPlayer))) {
-                    memcpy(n->snap, payload + sizeof(PktSnapHead), cnt * sizeof(PktPlayer));
-                    n->snap_count = cnt;
-                    n->have_snapshot = true;
-                    n->snap_age = 0;
-                    apply_snapshot(n, g);
+                if (total < 0 || total > PKT_MAX_PLAYERS) total = PKT_MAX_PLAYERS;
+                if (start < 0 || start > PKT_MAX_PLAYERS) start = 0;
+                if (start + cnt > PKT_MAX_PLAYERS) cnt = PKT_MAX_PLAYERS - start;
+                if (sh->frame != n->snap_frame) {
+                    n->snap_frame = sh->frame;
+                    n->snap_mask = 0;
+                    n->snap_count = total;
+                    n->have_snapshot = false;
+                }
+                if (cnt > 0 && plen >= (int)(sizeof(PktSnapHead) + cnt * sizeof(PktPlayer))) {
+                    memcpy(&n->snap[start], payload + sizeof(PktSnapHead), cnt * sizeof(PktPlayer));
+                    for (int k = 0; k < cnt; k++) n->snap_mask |= (1ull << (start + k));
+                    uint64_t need = total >= 64 ? ~0ull : ((1ull << total) - 1ull);
+                    if ((n->snap_mask & need) == need) {
+                        n->snap_count = total;
+                        n->have_snapshot = true;
+                        n->snap_age = 0;
+                        apply_snapshot(n, g);
+                    }
                 }
             }
             break;
@@ -472,33 +495,46 @@ void net_host_broadcast(Net* n, Game* g, float dt) {
     if (n->snap_accum < 1.0f / 20.0f) return;
     n->snap_accum = 0;
     static unsigned char buf[NET_MAX_PKT];
-    PktSnapHead* sh = (PktSnapHead*)buf;
     int cnt = g->num_players;
     if (cnt > PKT_MAX_PLAYERS) cnt = PKT_MAX_PLAYERS;
-    sh->count = (uint8_t)cnt;
-    memset(sh->pad, 0, sizeof(sh->pad));
-    PktPlayer* pp = (PktPlayer*)(buf + sizeof(PktSnapHead));
-    for (int i = 0; i < cnt; i++) {
-        Player* p = &g->players[i];
-        PktPlayer* o = &pp[i];
-        memset(o, 0, sizeof(*o));
-        o->x = p->pos.x; o->y = p->pos.y; o->z = p->pos.z;
-        o->yaw = p->yaw; o->pitch = p->pitch;
-        o->health = p->health; o->armor = p->armor;
-        o->frags = p->frags; o->deaths = p->deaths;
-        for (int w = 0; w < WPN_COUNT && w < 8; w++) o->ammo[w] = (uint16_t)clampf((float)p->ammo[w], 0, 999);
-        o->weapon = (uint8_t)(p->weapon < 0 ? 0 : p->weapon);
-        o->alive = p->alive ? 1 : 0;
-        o->bot = p->bot ? 1 : 0;
-        o->active = p->active ? 1 : 0;
-        o->is_local = (i == g->local_player) ? 1 : 0;
-        str_copy(o->name, p->name, sizeof(o->name));
-    }
-    int len = (int)(sizeof(PktSnapHead) + cnt * sizeof(PktPlayer));
-    if (n->use_lobby) send_to(n, &n->lobby_addr, PKT_SNAPSHOT, 0, ++n->seq, 0, buf, len);
-    else {
-        for (int i = 0; i < PKT_MAX_PLAYERS; i++)
-            if (n->remote_alive[i]) send_to(n, &n->peers[i], PKT_SNAPSHOT, 0, ++n->seq, 0, buf, len);
+    if (cnt < 1) return;
+    int per = (int)((NET_MAX_PKT - sizeof(PktHdr) - sizeof(PktSnapHead)) / sizeof(PktPlayer));
+    if (per < 1) per = 1;
+    if (per > PKT_MAX_PLAYERS) per = PKT_MAX_PLAYERS;
+    uint8_t frame = (uint8_t)(n->snap_frame_out + 1);
+    n->snap_frame_out = frame;
+    for (int start = 0; start < cnt; start += per) {
+        int chunk = cnt - start;
+        if (chunk > per) chunk = per;
+        PktSnapHead* sh = (PktSnapHead*)buf;
+        sh->count = (uint8_t)chunk;
+        sh->start = (uint8_t)start;
+        sh->total = (uint8_t)cnt;
+        sh->frame = frame;
+        PktPlayer* pp = (PktPlayer*)(buf + sizeof(PktSnapHead));
+        for (int k = 0; k < chunk; k++) {
+            int i = start + k;
+            Player* p = &g->players[i];
+            PktPlayer* o = &pp[k];
+            memset(o, 0, sizeof(*o));
+            o->x = p->pos.x; o->y = p->pos.y; o->z = p->pos.z;
+            o->yaw = p->yaw; o->pitch = p->pitch;
+            o->health = p->health; o->armor = p->armor;
+            o->frags = p->frags; o->deaths = p->deaths;
+            for (int w = 0; w < WPN_COUNT && w < 8; w++) o->ammo[w] = (uint16_t)clampf((float)p->ammo[w], 0, 999);
+            o->weapon = (uint8_t)(p->weapon < 0 ? 0 : p->weapon);
+            o->alive = p->alive ? 1 : 0;
+            o->bot = p->bot ? 1 : 0;
+            o->active = p->active ? 1 : 0;
+            o->is_local = (i == g->local_player) ? 1 : 0;
+            str_copy(o->name, p->name, sizeof(o->name));
+        }
+        int len = (int)(sizeof(PktSnapHead) + chunk * sizeof(PktPlayer));
+        if (n->use_lobby) send_to(n, &n->lobby_addr, PKT_SNAPSHOT, 0, ++n->seq, 0, buf, len);
+        else {
+            for (int i = 0; i < PKT_MAX_PLAYERS; i++)
+                if (n->remote_alive[i]) send_to(n, &n->peers[i], PKT_SNAPSHOT, 0, ++n->seq, 0, buf, len);
+        }
     }
 }
 
