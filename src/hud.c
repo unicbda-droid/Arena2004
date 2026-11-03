@@ -132,9 +132,23 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     ui_rect(ui, sx, 0, stripW, 56, col(0.02f, 0.03f, 0.045f, 0.78f));
     ui_rect(ui, sx, 53, stripW, 3, col(accent.r, accent.g, accent.b, 0.85f));
     char tbuf[32]; game_time_string(g->time_limit - g->match_time, tbuf, sizeof(tbuf));
-    ui_text_center(ui, cx, 6, tbuf, 25, g->match_time > g->time_limit - 60 ? red : white);
+    if (g->game_mode == GM_INVASION) {
+        int survivors = 0;
+        for (int i = 0; i < g->num_players; i++)
+            if (g->players[i].active && g->players[i].alive && !g->players[i].zombie) survivors++;
+        if (g->invasion_wave < 1) snprintf(tbuf, sizeof(tbuf), "GET READY");
+        else snprintf(tbuf, sizeof(tbuf), "WAVE %d / %d", g->invasion_wave, g->invasion_wave_max);
+        (void)survivors;
+    }
+    ui_text_center(ui, cx, 6, tbuf, 25, (g->game_mode != GM_INVASION && g->match_time > g->time_limit - 60) ? red : white);
     char sub[128];
-    if (game_mode_team_based(g->game_mode)) {
+    if (g->game_mode == GM_INVASION) {
+        int survivors = 0;
+        for (int i = 0; i < g->num_players; i++)
+            if (g->players[i].active && g->players[i].alive && !g->players[i].zombie) survivors++;
+        snprintf(sub, sizeof(sub), "HOSTILES %d   QUEUED %d   SURVIVORS %d   KILLS %d",
+                 g->invasion_alive, g->invasion_spawn_left, survivors, g->invasion_killed);
+    } else if (game_mode_team_based(g->game_mode)) {
         snprintf(sub, sizeof(sub), "%s   RED %d : %d BLUE   LIMIT %d",
                  game_mode_short(g->game_mode), g->team_score[0], g->team_score[1], (int)g->score_limit);
     } else if (g->game_mode == GM_BATTLE_ROYALE) {
@@ -152,7 +166,7 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     else
         snprintf(sc, sizeof(sc), "%d", me->frags);
     ui_text_right(ui, sx - 18, 6, sc, 30, game_mode_team_based(g->game_mode) ? (me->team == 0 ? red : cyan) : white);
-    ui_text_right(ui, sx - 18, 38, game_mode_team_based(g->game_mode) ? "TEAM" : "FRAGS", 9, dim);
+    ui_text_right(ui, sx - 18, 38, game_mode_team_based(g->game_mode) ? "TEAM" : (g->game_mode == GM_INVASION ? "KILLS" : "FRAGS"), 9, dim);
     char dc[32];
     if (game_mode_team_based(g->game_mode) && me->team >= 0)
         snprintf(dc, sizeof(dc), "%d", g->team_score[1 - me->team]);
@@ -174,6 +188,37 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
         ky += 26;
     }
 
+    /* ---------- vehicle panel ---------- */
+    if (me->alive && me->in_vehicle && me->vehicle >= 0 && me->vehicle < g->vehicle_count) {
+        Vehicle* v = &g->vehicles[me->vehicle];
+        const VehicleDef* vd = &vehicle_defs[v->type];
+        float vx = 34, vy = (float)h - 232;
+        ui_rect(ui, vx - 12, vy - 10, 320, 92, col(0.02f, 0.035f, 0.05f, 0.80f));
+        ui_rect(ui, vx - 12, vy - 10, 4, 92, col(accent.r, accent.g, accent.b, 0.95f));
+        ui_text(ui, vx, vy - 4, game_vehicle_name(v->type), 20, white);
+        char vs[32]; snprintf(vs, sizeof(vs), "%s", game_vehicle_short(v->type));
+        ui_text_right(ui, vx + 296, vy - 2, vs, 10, dim);
+        float hpfrac = v->max_hp > 0 ? clampf(v->hp / v->max_hp, 0, 1) : 0.0f;
+        Color hpc = hpfrac > 0.5f ? green : (hpfrac > 0.22f ? col(1.0f, 0.78f, 0.2f, 1) : red);
+        char vh[32]; snprintf(vh, sizeof(vh), "%d / %d", (int)ceilf(v->hp), (int)ceilf(v->max_hp));
+        ui_text(ui, vx, vy + 21, "HULL", 9, dim);
+        bar(ui, vx + 40, vy + 23, 200, 10, hpfrac, hpc, col(0.06f, 0.09f, 0.11f, 0.9f));
+        ui_text(ui, vx + 248, vy + 21, vh, 10, hpc);
+        ui_text(ui, vx, vy + 42, vd->splash > 0.1f ? "E = AUSSTEIGEN   FEUER = SALVE" : "E = AUSSTEIGEN   FEUER = PLASMA",
+                9, col(0.70f, 0.80f, 0.90f, 0.95f));
+        /* module pips: wheels, engine, weapon. A dead module turns red and
+         * empty, so the driver instantly sees why the buggy pulls or is silent. */
+        static const char* MOD_LBL[VEH_MODULES] = { "FL", "FR", "BL", "BR", "ENG", "WPN" };
+        for (int k = 0; k < VEH_MODULES; k++) {
+            float mx = vx + (float)k * 49.0f;
+            float f = v->modules[k].max_hp > 0.0f ? clampf(v->modules[k].hp / v->modules[k].max_hp, 0, 1) : 0.0f;
+            Color mc = v->modules[k].destroyed ? col(0.95f, 0.22f, 0.16f, 1) :
+                       (f > 0.55f ? col(0.55f, 0.85f, 0.55f, 1) : col(1.0f, 0.72f, 0.18f, 1));
+            ui_text(ui, mx, vy + 60, MOD_LBL[k], 8, v->modules[k].destroyed ? mc : dim);
+            bar(ui, mx, vy + 72, 42, 5, f, mc, col(0.07f, 0.08f, 0.09f, 0.9f));
+        }
+    }
+
     /* ---------- bottom left: health / armor ---------- */
     float bx = 34, by = (float)h - 118;
     ui_rect(ui, bx - 12, by - 10, 320, 100, col(0.02f, 0.03f, 0.045f, 0.72f));
@@ -182,13 +227,14 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     char hbuf[16]; snprintf(hbuf, sizeof(hbuf), "%d", (int)ceilf(me->health));
     ui_text(ui, bx, by - 4, hbuf, 42, me->health < 30 ? red : white);
     ui_text(ui, bx + ui_text_width(ui, hbuf, 42) + 8, by + 20, "HEALTH", 10, dim);
-    float maxhp = 100.0f + (float)((me->level > 1 ? me->level : 1) - 1) * 20.0f;
+    float maxhp = game_player_max_health(me);
+    float maxarmor = game_player_max_armor(me);
     bar(ui, bx + 100, by + 8, 190, 14, me->health / maxhp, me->health < 30 ? red : green, col(0.06f, 0.10f, 0.12f, 0.9f));
 
     char abuf[16]; snprintf(abuf, sizeof(abuf), "%d", (int)ceilf(me->armor));
     ui_text(ui, bx, by + 46, abuf, 26, me->armor > 0 ? cyan : dim);
     ui_text(ui, bx + ui_text_width(ui, abuf, 26) + 8, by + 58, "SHIELD", 10, dim);
-    bar(ui, bx + 100, by + 56, 190, 12, me->armor / 100.0f, cyan, col(0.06f, 0.08f, 0.14f, 0.9f));
+    bar(ui, bx + 100, by + 56, 190, 12, me->armor / fmaxf(maxarmor, 1.0f), cyan, col(0.06f, 0.08f, 0.14f, 0.9f));
 
     if (me->protection > 0) {
         char pr[32]; snprintf(pr, sizeof(pr), "SPAWN PROTECTION %.1f", me->protection);
@@ -203,19 +249,23 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     ui_text(ui, w - 258, h - 110, weapon_ammo_name(wi), 12, white);
     char ammo[32]; snprintf(ammo, sizeof(ammo), "%d", me->ammo[wi]);
     ui_text_right(ui, w - 44, h - 114, ammo, 46, me->ammo[wi] <= 3 ? red : white);
-    char mx[32]; snprintf(mx, sizeof(mx), "/ %d", weapon_defs[wi].ammo_max);
+    char mx[32]; snprintf(mx, sizeof(mx), "/ %d", game_player_ammo_max(me, wi));
     ui_text_right(ui, w - 44, h - 66, mx, 11, dim);
     ui_text(ui, w - 258, h - 92, "AMMO", 9, dim);
 
     /* ---------- RPG level / XP ---------- */
-    if (g->game_mode == GM_RPG) {
+    if (g->game_mode == GM_RPG || g->game_mode == GM_INVASION) {
         char lv[64];
         snprintf(lv, sizeof(lv), "LEVEL %d", me->level > 0 ? me->level : 1);
         ui_text(ui, bx + 100, by + 90, lv, 11, col(0.45f, 1.0f, 0.60f, 1));
         float xpfrac = me->xp_next > 0 ? (float)me->xp / (float)me->xp_next : 0.0f;
         bar(ui, bx + 165, by + 92, 125, 7, xpfrac, col(0.45f, 0.95f, 0.55f, 1), col(0.06f, 0.10f, 0.09f, 0.9f));
-        char xb[32]; snprintf(xb, sizeof(xb), "%d / %d XP", me->xp, me->xp_next);
+        char xb[64]; snprintf(xb, sizeof(xb), "%d / %d XP   //   %d CR   //   %s", me->xp, me->xp_next,
+                              me->credits, game_rank_name(me->rank));
         ui_text_right(ui, bx + 290, by + 100, xb, 8, dim);
+        if (me->vamp_flash > 0.05f) {
+            ui_rect_outline(ui, bx + 100, by + 6, 190, 18, col(0.9f, 0.15f, 0.35f, 0.25f * me->vamp_flash), 1);
+        }
     }
 
     /* ---------- objectives ---------- */
@@ -308,16 +358,79 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
         ui_text_center(ui, cx, h * 0.34f + 78, rb, 13, dim);
     }
 
-    /* ---------- match over ---------- */
+    /* ---------- match over / victory & defeat sequence ---------- */
     if (g->match_over) {
-        ui_rect(ui, 0, 0, (float)w, (float)h, col(0.0f, 0.0f, 0.0f, 0.62f));
-        ui_rect(ui, cx - 300, h * 0.22f, 600, 100, col(0.03f, 0.05f, 0.07f, 0.95f));
-        ui_rect(ui, cx - 300, h * 0.22f, 600, 3, accent);
-        ui_text_center(ui, cx, h * 0.22f + 12, "MATCH OVER", 36, accent);
-        const char* wn = (g->winner >= 0 && g->winner < g->num_players) ? g->players[g->winner].name : "-";
-        char wb[96]; snprintf(wb, sizeof(wb), "%s WINS", wn);
-        ui_text_center(ui, cx, h * 0.22f + 58, wb, 20, white);
-        ui_text_center(ui, cx, h * 0.22f + 116, "PRESS  TAB  FOR SCORES   //   F5 TO RESTART", 12, dim);
+        float t = g->match_over_t;
+        float a = clampf(t * 2.4f, 0, 1);
+        bool win = false;
+        if (g->game_mode == GM_INVASION) win = g->invasion_victory;
+        else if (game_mode_team_based(g->game_mode))
+            win = (g->winner >= 0 && g->winner < g->num_players && me->team >= 0 &&
+                   g->players[g->winner].team == me->team);
+        else win = (g->winner == g->local_player);
+        ui_rect(ui, 0, 0, (float)w, (float)h, col(0.0f, 0.0f, 0.0f, 0.70f * a));
+        float pw = 760, ph = 486;
+        float px = cx - pw * 0.5f, py = h * 0.5f - ph * 0.5f + (1.0f - a) * 40.0f;
+        Color steel = col(0.075f, 0.082f, 0.092f, 0.97f);
+        Color rust = col(0.42f, 0.18f, 0.075f, 1.0f);
+        Color hazard = win ? col(0.96f, 0.74f, 0.16f, 1.0f) : col(0.82f, 0.22f, 0.14f, 1.0f);
+        ui_rect(ui, px, py, pw, ph, col(0.012f, 0.014f, 0.017f, 0.96f));
+        ui_rect(ui, px + 6, py + 6, pw - 12, ph - 12, steel);
+        ui_rect_outline(ui, px + 6, py + 6, pw - 12, ph - 12, col(0.34f, 0.36f, 0.39f, 1), 2);
+        ui_rect_outline(ui, px + 10, py + 10, pw - 20, ph - 20, rust, 1);
+        /* hazard stripe rail */
+        for (int i = 0; i < 24; i++)
+            ui_rect(ui, px + 16 + i * 30, py + 18, 18, 9, col(hazard.r, hazard.g, hazard.b, 0.9f));
+        for (int i = 0; i < 24; i++)
+            ui_rect(ui, px + 16 + i * 30, py + ph - 27, 18, 9, col(hazard.r, hazard.g, hazard.b, 0.65f));
+        const char* head = win ? "VICTORY" : (g->game_mode == GM_INVASION ? "OVERRUN" : "DEFEAT");
+        const char* sub = g->result[0] ? g->result : (win ? "MATCH WON" : "MATCH LOST");
+        ui_text_center(ui, cx + 3, py + 54, head, 62, col(0, 0, 0, 0.85f));
+        ui_text_center(ui, cx, py + 51, head, 62, hazard);
+        ui_text_center(ui, cx, py + 120, sub, 16, col(0.94f, 0.92f, 0.86f, a));
+        ui_rect(ui, px + 40, py + 148, pw - 80, 2, rust);
+        /* scoreboard top 5 with points */
+        ScoreEntry sc[MAX_PLAYERS];
+        int sn = 0;
+        game_sort_scores(g, sc, &sn);
+        int shown = sn > 5 ? 5 : sn;
+        ui_text(ui, px + 46, py + 160, "RANGLISTE", 10, col(0.72f, 0.66f, 0.58f, 1));
+        ui_text(ui, px + pw - 232, py + 160, "PUNKTE", 9, col(0.72f, 0.66f, 0.58f, 1));
+        ui_text(ui, px + pw - 158, py + 160, "KILLS", 9, col(0.72f, 0.66f, 0.58f, 1));
+        float ry = py + 178;
+        for (int i = 0; i < shown; i++) {
+            ScoreEntry* e = &sc[i];
+            bool local = e->id == g->local_player;
+            if (local) ui_rect(ui, px + 40, ry - 3, pw - 80, 26, col(0.16f, 0.13f, 0.08f, 0.9f));
+            char nb[64];
+            snprintf(nb, sizeof(nb), "%d. %s", i + 1, e->name);
+            ui_text(ui, px + 50, ry, nb, 13, local ? hazard : col(0.88f, 0.89f, 0.9f, 1));
+            char vb[24];
+            snprintf(vb, sizeof(vb), "%d", e->points);
+            ui_text_right(ui, px + pw - 198, ry, vb, 13, col(0.95f, 0.82f, 0.42f, 1));
+            snprintf(vb, sizeof(vb), "%d", e->frags);
+            ui_text_right(ui, px + pw - 124, ry, vb, 13, white);
+            ry += 27;
+        }
+        /* reward ledger */
+        float ly = py + 336;
+        ui_rect(ui, px + 40, ly - 8, pw - 80, 84, col(0.02f, 0.03f, 0.035f, 0.85f));
+        ui_rect(ui, px + 40, ly - 8, 4, 84, hazard);
+        ui_text(ui, px + 56, ly, "AUSBEUTE", 10, col(0.72f, 0.66f, 0.58f, 1));
+        char rb[192];
+        snprintf(rb, sizeof(rb), "%d PUNKTE    //    %d CREDITS    //    %d KILLS    //    %d ASSISTS",
+                 me->score_points, me->credits, me->frags, me->assists);
+        ui_text(ui, px + 56, ly + 18, rb, 14, col(0.97f, 0.95f, 0.88f, 1));
+        char rk[192];
+        snprintf(rk, sizeof(rk), "KARRIERE %d PTS   //   RANG %s   //   %d/%d WELLEN   //   %d ZOMBIES",
+                 me->career_points, game_rank_name(me->rank), g->invasion_wave, g->invasion_wave_max,
+                 g->invasion_killed);
+        ui_text(ui, px + 56, ly + 42, rk, 10, col(0.62f, 0.68f, 0.74f, 1));
+        ui_text(ui, px + 56, ly + 62, win ? "DRUCK AUF DIE SCHULTER. DAS NAECHSTE GEFECHt KOMMT." : "ANALYSIERE. AUFRUESTEN. ZURUECK IN DIE ARENA.",
+                9, col(0.55f, 0.50f, 0.44f, 1));
+        if (t > 1.15f)
+            ui_text_center(ui, cx, py + ph - 48, "TAB = SCORES   //   F5 = NEUSTART   //   F10 = MENUE   //   KONSOLE: results",
+                           10, col(0.75f, 0.72f, 0.64f, a));
     }
 
     /* ---------- fps / net ---------- */
@@ -336,7 +449,7 @@ void hud_scoreboard(Ui* ui, Game* g, int w, int h) {
     int n = 0;
     game_sort_scores(g, scores, &n);
     int shown = n > 16 ? 16 : n;
-    float pw = 660, ph = 100 + shown * 34 + 40;
+    float pw = 760, ph = 100 + shown * 34 + 40;
     float px = w * 0.5f - pw * 0.5f, py = h * 0.5f - ph * 0.5f;
     ui_rect(ui, 0, 0, (float)w, (float)h, col(0, 0, 0, 0.35f));
     ui_rect(ui, px, py, pw, ph, col(0.025f, 0.035f, 0.05f, 0.96f));
@@ -354,6 +467,7 @@ void hud_scoreboard(Ui* ui, Game* g, int w, int h) {
 
     float ry = py + 68;
     ui_text(ui, px + 24, ry, "PLAYER", 10, dim);
+    ui_text(ui, px + pw - 300, ry, "PTS", 10, dim);
     ui_text(ui, px + pw - 230, ry, "FRAGS", 10, dim);
     ui_text(ui, px + pw - 150, ry, "DEATHS", 10, dim);
     ui_text(ui, px + pw - 70, ry, "RATIO", 10, dim);
@@ -373,6 +487,7 @@ void hud_scoreboard(Ui* ui, Game* g, int w, int h) {
             ui_text(ui, px + 54 + ui_text_width(ui, e->name, 14) + 8, ry + 3, tag, 9, local ? accent : dim);
         }
         char v[24];
+        snprintf(v, sizeof(v), "%d", e->points); ui_text_right(ui, px + pw - 300 + 40, ry, v, 12, col(0.95f, 0.82f, 0.42f, 1));
         snprintf(v, sizeof(v), "%d", e->frags); ui_text_right(ui, px + pw - 230 + 40, ry, v, 16, white);
         snprintf(v, sizeof(v), "%d", e->deaths); ui_text_right(ui, px + pw - 150 + 40, ry, v, 14, dim);
         float ratio = e->deaths > 0 ? (float)e->frags / e->deaths : (float)e->frags;

@@ -25,7 +25,7 @@
 #include "steam_bridge.h"
 
 enum { MODE_MENU = 0, MODE_GAME = 1, MODE_EDITOR = 2 };
-enum { PAGE_MAIN = 0, PAGE_HOST, PAGE_JOIN, PAGE_SETTINGS };
+enum { PAGE_MAIN = 0, PAGE_HOST, PAGE_JOIN, PAGE_SETTINGS, PAGE_ARMORY };
 #define APP_MAX_MAPS 48
 
 typedef struct {
@@ -119,6 +119,10 @@ typedef struct {
     bool log_enabled;
     char log_path[192];
     bool netgraph;
+    /* persistent career profile (survives matches / restarts) */
+    int prof_credits, prof_points;
+    int prof_upg[UPG_COUNT];
+    bool result_saved;
 } App;
 
 /* ------------------------------------------------------------------ */
@@ -199,6 +203,82 @@ static void app_cycle_map(App* a, int dir) {
     if (a->map_count <= 1) return;
     int ni = (a->map_index + dir + a->map_count) % a->map_count;
     app_load_map(a, ni);
+}
+
+/* ------------------------------------------------------------------ */
+/* persistent career / shop profile                                    */
+/* ------------------------------------------------------------------ */
+static void app_profile_path(char* buf, int cap) {
+    const char* home = getenv("HOME");
+    if (home && home[0]) snprintf(buf, cap, "%s/.arena2004_profile", home);
+    else snprintf(buf, cap, "arena2004.profile");
+}
+
+static void app_profile_load(App* a) {
+    a->prof_credits = 250;
+    a->prof_points = 0;
+    memset(a->prof_upg, 0, sizeof(a->prof_upg));
+    char path[512];
+    app_profile_path(path, sizeof(path));
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    char line[192];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32]; int val = 0;
+        if (sscanf(line, "credits %d", &val) == 1) { a->prof_credits = val; continue; }
+        if (sscanf(line, "points %d", &val) == 1) { a->prof_points = val; continue; }
+        char key2[32];
+        if (sscanf(line, "upg %31s %d", key2, &val) == 2) {
+            for (int i = 0; i < UPG_COUNT; i++)
+                if (!strcmp(key2, game_upgrade_key(i))) {
+                    if (val < 0) val = 0;
+                    if (val > game_upgrade_max(i)) val = game_upgrade_max(i);
+                    a->prof_upg[i] = val;
+                }
+        }
+        (void)key;
+    }
+    fclose(f);
+    if (a->prof_credits < 0) a->prof_credits = 0;
+    if (a->prof_points < 0) a->prof_points = 0;
+}
+
+static void app_profile_save(App* a) {
+    if (!a || a->selftest || a->hidden) return;
+    char path[512];
+    app_profile_path(path, sizeof(path));
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "# Arena2004 career profile\n");
+    fprintf(f, "credits %d\n", a->prof_credits);
+    fprintf(f, "points %d\n", a->prof_points);
+    for (int i = 0; i < UPG_COUNT; i++)
+        fprintf(f, "upg %s %d\n", game_upgrade_key(i), a->prof_upg[i]);
+    fclose(f);
+}
+
+static void app_profile_apply(App* a) {
+    if (!a->game) return;
+    int li = a->game->local_player;
+    if (li < 0 || li >= a->game->num_players) return;
+    Player* p = &a->game->players[li];
+    p->credits = a->prof_credits;
+    p->career_points = a->prof_points;
+    for (int i = 0; i < UPG_COUNT; i++) p->upg[i] = a->prof_upg[i];
+    game_player_refresh_stats(p);
+    p->rank = game_rank_index(p->career_points);
+    if (p->alive) p->health = game_player_max_health(p);
+}
+
+static void app_profile_capture(App* a) {
+    if (!a->game || a->mode != MODE_GAME) return;
+    if (a->game->networked && !a->game->server_mode) return;
+    int li = a->game->local_player;
+    if (li < 0 || li >= a->game->num_players) return;
+    Player* p = &a->game->players[li];
+    a->prof_credits = p->credits;
+    a->prof_points = p->career_points;
+    for (int i = 0; i < UPG_COUNT; i++) a->prof_upg[i] = p->upg[i];
 }
 
 static void split_host_port(const char* s, char* host, int hcap, int* port) {
@@ -288,6 +368,8 @@ static void app_start_game(App* a, bool demo, int bots) {
     a->game->fov = a->fov;
     a->game->gravity = a->gravity;
     a->game->fps = a->fps;
+    app_profile_apply(a);
+    a->result_saved = false;
     a->mode = MODE_GAME;
     a->paused = false;
     a->show_scores = false;
@@ -326,6 +408,8 @@ static void app_start_host(App* a) {
     a->game->gravity = a->gravity;
     a->game->networked = true;
     a->game->server_mode = true;
+    app_profile_apply(a);
+    a->result_saved = false;
     a->mode = MODE_GAME;
     a->paused = false;
     a->was_alive = false;
@@ -422,12 +506,16 @@ static const char* CONSOLE_HELP[] = {
     "staticmesh | trigger <cmd>   Static Mesh / Event-Trigger (Passkontrolle)",
     "insert orc|player            Bot ins laufende Match einfuegen",
     "addbot [n] | removebot       Bots hinzufuegen / entfernen",
-    "mode <dm|tdm|ctf|vctf|assault|onslaught|conquest|rpg|br>  Spielmodus",
+    "mode <dm|tdm|ctf|vctf|assault|onslaught|conquest|rpg|br|invasion>  Modus",
+    "invasion | horde [n] | wave  Zombie-Invasion starten / Horde / Welle",
+    "shop | upgrade <key> | rank  RPG-Upgrades, Credits, Karriere-Rang",
+    "results                      Nachkampf-Auswertung (Punkte/Credits)",
+    "ambient [n|on|off]           Natur/Tiere + bis zu 1000 Ambient-NPCs",
     "scale <5v5|32v32|64v64|128v128|256|1000|10k|30k>  Matchgroesse",
     "team [slot] <red|blue|none>  Teamzuordnung aendern",
     "mega <n> | zones [n]         PlanetSide-Zonen (bis 30000 Spieler)",
     "zone <id> | channels | channel <id>  Zone/Channel wechseln",
-    "objectives | score | vehicle [team]  Objectives, Punkte, Fahrzeug",
+    "objectives | score | vehicle [scorpion|manta|goliath] [red|blue]",
     "status | players            Server-/Spielerstatus wie CS",
     "protocol | netgraph         Netzwerkprotokoll / Netzanzeige",
     "nav [rebuild]                Navigationsgraph anzeigen / neu bauen",
@@ -946,8 +1034,8 @@ static void app_print_objectives(App* a) {
     }
     for (int i = 0; i < g->vehicle_count; i++) {
         Vehicle* v = &g->vehicles[i];
-        console_printf(&a->console, "  VEHICLE %d %s team=%s driver=%d hp=%.0f",
-                       i, v->type == 1 ? "Manta" : (v->type == 2 ? "Goliath" : "Scorpion"),
+        console_printf(&a->console, "  VEHICLE %d %-8s team=%s driver=%d hp=%.0f",
+                       i, game_vehicle_name(v->type),
                        v->team == 0 ? "red" : "blue", v->driver, v->hp);
     }
 }
@@ -983,6 +1071,7 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
         else if (!strcasecmp(a1, "host")) a->page = PAGE_HOST;
         else if (!strcasecmp(a1, "join")) a->page = PAGE_JOIN;
         else if (!strcasecmp(a1, "settings") || !strcasecmp(a1, "options")) a->page = PAGE_SETTINGS;
+        else if (!strcasecmp(a1, "armory") || !strcasecmp(a1, "shop") || !strcasecmp(a1, "upgrades")) a->page = PAGE_ARMORY;
         else { con_err(a, "menu: main|host|join|settings"); return; }
         audio_music(MUS_MENU);
         con_ok(a, "Menue: %s", a1 ? a1 : "main");
@@ -1089,6 +1178,10 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
         if (!a->game || a->mode != MODE_GAME) { con_ok(a, "kein laufendes Match"); return; }
         Game* g = a->game;
         console_printf(&a->console, "Match: %s  players=%d  nav=%d  fraglimit=%d", g->world->name, g->num_players, g->nav.count, g->frag_limit);
+        if (g->game_mode == GM_INVASION)
+            console_printf(&a->console, "INVASION wave=%d/%d hostiles=%d queued=%d survivors=%d kills=%d",
+                           g->invasion_wave, g->invasion_wave_max, g->invasion_alive,
+                           g->invasion_spawn_left, game_invasion_survivors_alive(g), g->invasion_killed);
         for (int i = 0; i < g->num_players; i++) {
             Player* p = &g->players[i];
             if (!p->active) continue;
@@ -1296,7 +1389,7 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
             return;
         }
         int m = game_mode_from_name(a1);
-        if (m < 0) { con_err(a, "mode: unbekannt '%s' (dm, tdm, ctf, vctf, assault, onslaught, conquest, rpg, br)", a1); return; }
+        if (m < 0) { con_err(a, "mode: unbekannt '%s' (dm, tdm, ctf, vctf, assault, onslaught, conquest, rpg, br, invasion)", a1); return; }
         a->game_mode = m;
         if (a->game && a->mode == MODE_GAME) {
             game_set_mode(a->game, m);
@@ -1382,12 +1475,163 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
     else if (!strcasecmp(cmd, "vehicle") || !strcasecmp(cmd, "veh")) {
         if (!a->game) { con_err(a, "vehicle: kein Match"); return; }
         Game* g = a->game;
-        int team = a1 ? con_int(a1, 0) : (g->players[g->local_player].team >= 0 ? g->players[g->local_player].team : 0);
+        int team = (g->local_player >= 0 && g->players[g->local_player].team >= 0)
+                   ? g->players[g->local_player].team : 0;
+        int type = -1;
+        for (int i = 1; i < n; i++) {
+            if (!strcasecmp(args[i], "red") || !strcasecmp(args[i], "rot")) team = 0;
+            else if (!strcasecmp(args[i], "blue") || !strcasecmp(args[i], "blau")) team = 1;
+            else {
+                int t = game_vehicle_type_from_name(args[i]);
+                if (t >= 0) type = t;
+            }
+        }
         if (team < 0 || team > 1) team = 0;
         int before = g->vehicle_count;
-        game_spawn_vehicle(g, team);
-        if (g->vehicle_count > before) con_ok(a, "Fahrzeug %d fuer %s gespawnt (E = ein/aus)", g->vehicle_count - 1, team == 0 ? "RED" : "BLUE");
-        else con_err(a, "vehicle: Limit erreicht");
+        if (type >= 0) game_spawn_vehicle_type(g, team, type);
+        else game_spawn_vehicle(g, team);
+        if (g->vehicle_count > before) {
+            Vehicle* v = &g->vehicles[g->vehicle_count - 1];
+            con_ok(a, "Fahrzeug %d %s fuer %s gespawnt (E = ein/aus, HP %.0f)",
+                   g->vehicle_count - 1, game_vehicle_name(v->type),
+                   team == 0 ? "RED" : "BLUE", v->max_hp);
+        } else con_err(a, "vehicle: Limit erreicht (max %d)", MAX_VEHICLES);
+    }
+    else if (!strcasecmp(cmd, "horde") || !strcasecmp(cmd, "zombies") || !strcasecmp(cmd, "zombie")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "horde: kein laufendes Match"); return; }
+        Game* g = a->game;
+        if (g->game_mode != GM_INVASION) {
+            con_err(a, "horde: zuerst 'mode invasion' starten");
+            return;
+        }
+        int count = a1 ? con_int(a1, 25) : 25;
+        if (count < 1) count = 1;
+        if (count > MAX_PLAYERS) count = MAX_PLAYERS;
+        int before = g->num_players;
+        int spawned = game_horde(g, count);
+        con_ok(a, "Horde: %d Zombies gespawnt (Slots %d..%d, gesamt %d)", spawned, before, g->num_players - 1, g->num_players);
+    }
+    else if (!strcasecmp(cmd, "wave") || !strcasecmp(cmd, "nextwave")) {
+        if (!a->game || a->mode != MODE_GAME || a->game->game_mode != GM_INVASION) {
+            con_err(a, "wave: kein laufendes Invasion-Match");
+            return;
+        }
+        game_next_wave(a->game);
+        con_ok(a, "Welle %d / %d", a->game->invasion_wave, a->game->invasion_wave_max);
+    }
+    else if (!strcasecmp(cmd, "invasion") || !strcasecmp(cmd, "survival")) {
+        if (!a1) {
+            if (!a->game || a->game->game_mode != GM_INVASION) { con_ok(a, "invasion: aktuell inaktiv"); return; }
+            Game* g = a->game;
+            int survivors = 0;
+            for (int i = 0; i < g->num_players; i++)
+                if (g->players[i].active && !g->players[i].zombie) survivors++;
+            console_printf(&a->console, "INVASION  Welle %d/%d  Hostiles %d  Queued %d  Survivors %d  Kills %d",
+                           g->invasion_wave, g->invasion_wave_max, g->invasion_alive,
+                           g->invasion_spawn_left, survivors, g->invasion_killed);
+            return;
+        }
+        if (a->game && a->mode == MODE_GAME) {
+            game_set_mode(a->game, GM_INVASION);
+            game_reset(a->game);
+            con_ok(a, "Invasion gestartet: %d Wellen", a->game->invasion_wave_max);
+        } else {
+            a->game_mode = GM_INVASION;
+            con_ok(a, "Modus fuer naechstes Match: Invasion");
+        }
+    }
+    else if (!strcasecmp(cmd, "shop") || !strcasecmp(cmd, "armory") || !strcasecmp(cmd, "upgrades")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "shop: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        if (li < 0 || li >= g->num_players) { con_err(a, "shop: kein lokaler Spieler"); return; }
+        Player* p = &g->players[li];
+        console_printf(&a->console, "ARMORY  //  CREDITS %d  //  RANG %s (%d PTS)  //  MATCH-PUNKTE %d",
+                       p->credits, game_rank_name(p->rank), p->career_points, p->score_points);
+        for (int i = 0; i < UPG_COUNT; i++) {
+            int cost = game_upgrade_cost(p, i);
+            console_printf(&a->console, "  %-10s lv %2d/%-2d  %s  %s", game_upgrade_key(i),
+                           p->upg[i], game_upgrade_max(i), game_upgrade_desc(i),
+                           cost < 0 ? "MAX" : "");
+            if (cost >= 0)
+                console_printf(&a->console, "      Kosten: %d CR   //   upgrade %s", cost, game_upgrade_key(i));
+        }
+        console_printf(&a->console, "Kauf: upgrade <damage|firerate|health|ammo|vamp|speed|armor>");
+    }
+    else if (!strcasecmp(cmd, "upgrade") || !strcasecmp(cmd, "buy")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "upgrade: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        if (li < 0 || li >= g->num_players) { con_err(a, "upgrade: kein lokaler Spieler"); return; }
+        int id = game_upgrade_from_name(a1);
+        if (id < 0) { con_err(a, "upgrade <damage|firerate|health|ammo|vamp|speed|armor>"); return; }
+        Player* p = &g->players[li];
+        int cost = game_upgrade_cost(p, id);
+        if (cost < 0) { con_err(a, "%s ist bereits max (%d)", game_upgrade_name(id), game_upgrade_max(id)); return; }
+        if (!game_upgrade_buy(g, p, id)) {
+            con_err(a, "%s kostet %d CR - du hast %d", game_upgrade_name(id), cost, p->credits);
+            return;
+        }
+        app_profile_capture(a);
+        app_profile_save(a);
+        con_ok(a, "%s -> Stufe %d  //  %d CR uebrig", game_upgrade_name(id), p->upg[id], p->credits);
+    }
+    else if (!strcasecmp(cmd, "credits") || !strcasecmp(cmd, "money")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "credits: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        if (li < 0 || li >= g->num_players) return;
+        Player* p = &g->players[li];
+        if (a1 && (!strcasecmp(a1, "add") || !strcasecmp(a1, "give"))) {
+            int add = a2 ? con_int(a2, 100) : 100;
+            p->credits += add;
+            app_profile_capture(a);
+            app_profile_save(a);
+        }
+        con_ok(a, "credits = %d  //  career = %d  //  rank = %s", p->credits, p->career_points,
+               game_rank_name(p->rank));
+    }
+    else if (!strcasecmp(cmd, "rank") || !strcasecmp(cmd, "career")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "rank: kein laufendes Match"); return; }
+        int li = a->game->local_player;
+        if (li < 0 || li >= a->game->num_players) return;
+        Player* p = &a->game->players[li];
+        console_printf(&a->console, "KARRIERE  %s  //  %d Punkte  //  %d Credits  //  Kills %d  Assists %d  Tode %d",
+                       game_rank_name(p->rank), p->career_points, p->credits, p->frags, p->assists, p->deaths);
+        console_printf(&a->console, "Match-Punkte: %d  //  Level %d  //  XP %d/%d",
+                       p->score_points, p->level, p->xp, p->xp_next);
+        if (a1 && !strcasecmp(a1, "save")) { app_profile_capture(a); app_profile_save(a); con_ok(a, "Profil gespeichert"); }
+        if (a1 && !strcasecmp(a1, "reset")) {
+            a->prof_credits = 250; a->prof_points = 0; memset(a->prof_upg, 0, sizeof(a->prof_upg));
+            p->credits = 250; p->career_points = 0; memset(p->upg, 0, sizeof(p->upg));
+            game_player_refresh_stats(p);
+            app_profile_save(a);
+            con_ok(a, "Profil zurueckgesetzt");
+        }
+    }
+    else if (!strcasecmp(cmd, "results") || !strcasecmp(cmd, "afteraction")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "results: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        Player* p = (li >= 0 && li < g->num_players) ? &g->players[li] : NULL;
+        console_printf(&a->console, "ERGEBNIS: %s", g->result[0] ? g->result : "MATCH LAEUFT");
+        if (p) console_printf(&a->console, "DEINE AUSBEUTE: %d Punkte  //  %d Credits  //  %d Kills  //  %d Assists  //  Rang %s",
+                              p->score_points, p->credits, p->frags, p->assists, game_rank_name(p->rank));
+    }
+    else if (!strcasecmp(cmd, "ambient") || !strcasecmp(cmd, "crowd") || !strcasecmp(cmd, "npc")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "ambient: kein laufendes Match"); return; }
+        Game* g = a->game;
+        if (a1 && (!strcasecmp(a1, "on") || !strcasecmp(a1, "off"))) {
+            g->nature_enabled = !strcasecmp(a1, "on");
+            con_ok(a, "Natur & Tierwelt: %s", g->nature_enabled ? "an" : "aus");
+            return;
+        }
+        int want = a1 ? con_int(a1, 120) : g->ambient_count;
+        if (want < 0) want = 0;
+        if (want > MAX_AMBIENT) want = MAX_AMBIENT;
+        int got = game_set_ambient(g, want);
+        con_ok(a, "Ambient-Population: %d NPCs (max %d) // Baeume %d // Tiere %d",
+               got, MAX_AMBIENT, g->tree_count, g->critter_count);
     }
     else if (!strcasecmp(cmd, "set")) { app_console_set(a, a1, a2, n > 2); }
     else if (!strcasecmp(cmd, "sensitivity")) { app_console_set(a, "sens", a1, n > 1); }
@@ -1683,6 +1927,11 @@ static void game_frame(App* a, float dt) {
         net_client_send_input(a->net, g, in, dt);
     }
     if (is_host) net_host_broadcast(a->net, g, dt);
+    if (g->match_over && !a->result_saved) {
+        a->result_saved = true;
+        app_profile_capture(a);
+        app_profile_save(a);
+    }
     if (!a->console.open) {
         if (g->match_over && a->key_edge[SDL_SCANCODE_F5]) {
             game_reset(g);
@@ -1698,6 +1947,8 @@ static void game_frame(App* a, float dt) {
             capture_mouse(a, !a->paused);
         }
         if (a->key_edge[SDL_SCANCODE_F10]) {
+            app_profile_capture(a);
+            app_profile_save(a);
             app_release_net(a);
             a->mode = MODE_MENU;
             a->page = PAGE_MAIN;
@@ -1797,6 +2048,8 @@ static void draw_menu(App* a, Ui* ui) {
         y += 50;
         if (ui_button(ui, "menu.settings", "SETTINGS", 60, y, 210, 36, 0)) a->page = PAGE_SETTINGS;
         if (ui_button(ui, "menu.quit", "QUIT", 280, y, 210, 36, 0)) a->running = false;
+        y += 46;
+        if (ui_button(ui, "menu.armory", "ARMORY & CAREER  //  UPGRADES", 60, y, 430, 34, 0)) a->page = PAGE_ARMORY;
 
         /* status */
         if (a->status_t > 0 || a->status[0]) {
@@ -1929,6 +2182,64 @@ static void draw_menu(App* a, Ui* ui) {
             a->page = PAGE_MAIN;
         }
         if (a->status[0]) ui_text(ui, 60, (float)h - 80, a->status, 10, col(0.65f, 0.7f, 0.78f, 1));
+    } else if (a->page == PAGE_ARMORY) {
+        /* rugged industrial armory: gunmetal, rust and hazard stripes */
+        for (int i = 0; i < 14; i++)
+            ui_rect(ui, 60 + i * 30, 148, 18, 8, col(0.95f, 0.62f, 0.08f, 0.75f));
+        ui_text(ui, 60, 166, "ARMORY  //  DRUID PROTOCOL", 24, col(0.96f, 0.78f, 0.38f, 1));
+        ui_text(ui, 60, 198, "Permanente Upgrades. Credits verdienst du mit Kills, Assists und Siegen.", 10, col(0.60f, 0.65f, 0.72f, 1));
+        Player tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        if (a->game && a->mode == MODE_GAME && a->game->local_player >= 0 &&
+            a->game->local_player < a->game->num_players) {
+            tmp = a->game->players[a->game->local_player];
+        } else {
+            tmp.credits = a->prof_credits;
+            tmp.career_points = a->prof_points;
+            for (int i = 0; i < UPG_COUNT; i++) tmp.upg[i] = a->prof_upg[i];
+        }
+        char hb[192];
+        snprintf(hb, sizeof(hb), "CREDITS %d   //   RANG %s   //   KARRIERE %d PTS",
+                 tmp.credits, game_rank_name(game_rank_index(tmp.career_points)), tmp.career_points);
+        ui_text(ui, 60, 220, hb, 12, col(0.55f, 0.95f, 1.0f, 1));
+        ui_rect(ui, 60, 242, 490, 2, col(0.55f, 0.22f, 0.10f, 0.9f));
+        float y = 258;
+        for (int i = 0; i < UPG_COUNT; i++) {
+            int lvl = tmp.upg[i];
+            int cost = game_upgrade_cost(&tmp, i);
+            bool maxed = cost < 0;
+            Color row = (i % 2) ? col(0.055f, 0.062f, 0.072f, 0.95f) : col(0.032f, 0.038f, 0.046f, 0.95f);
+            ui_rect(ui, 60, y, 490, 46, row);
+            ui_rect(ui, 60, y, 3, 46, maxed ? col(0.45f, 0.75f, 0.45f, 1) : col(0.72f, 0.30f, 0.10f, 1));
+            ui_text(ui, 72, y + 5, game_upgrade_name(i), 13, col(0.95f, 0.92f, 0.85f, 1));
+            char lb[64];
+            snprintf(lb, sizeof(lb), "LV %d/%d", lvl, game_upgrade_max(i));
+            ui_text(ui, 300, y + 5, lb, 10, col(0.60f, 0.95f, 0.55f, 1));
+            ui_text(ui, 72, y + 23, game_upgrade_desc(i), 9, col(0.55f, 0.60f, 0.68f, 1));
+            char cb[40];
+            if (maxed) snprintf(cb, sizeof(cb), "MAX");
+            else snprintf(cb, sizeof(cb), "%d CR", cost);
+            ui_text(ui, 390, y + 14, cb, 11, maxed ? col(0.5f, 0.8f, 0.5f, 1) : col(1.0f, 0.76f, 0.28f, 1));
+            char bid[48]; snprintf(bid, sizeof(bid), "armory.buy.%d", i);
+            if (!maxed && ui_button(ui, bid, "KAUFEN", 448, y + 9, 88, 28, 0)) {
+                int id = i;
+                bool bought = false;
+                if (a->game && a->mode == MODE_GAME) {
+                    Game* g = a->game;
+                    int li = g->local_player;
+                    if (li >= 0 && li < g->num_players && game_upgrade_buy(g, &g->players[li], id)) bought = true;
+                } else if (a->prof_credits >= cost && a->prof_upg[id] < game_upgrade_max(id)) {
+                    a->prof_credits -= cost;
+                    a->prof_upg[id]++;
+                    bought = true;
+                }
+                if (bought) { app_profile_capture(a); app_profile_save(a); }
+            }
+            y += 50;
+        }
+        if (ui_button(ui, "armory.back", "ZURUECK", 60, y + 14, 150, 36, 0)) a->page = PAGE_MAIN;
+        ui_text(ui, 230, y + 22, "TIPP: Im laufenden Match geht das auch per Konsole: shop / upgrade <key>", 9,
+                col(0.5f, 0.55f, 0.62f, 1));
     } else {
         ui_text(ui, 60, 162, "SETTINGS", 20, col(0.95f, 0.97f, 1, 1));
         float y = 210;
@@ -2252,6 +2563,7 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     str_copy(a->join_lobby, "127.0.0.1", sizeof(a->join_lobby));
     str_copy(a->join_lobby_port, "7777", sizeof(a->join_lobby_port));
     str_copy(a->join_code, "", sizeof(a->join_code));
+    app_profile_load(a);
     a->join_via_lobby = false;
     a->host_via_lobby = false;
     console_init(&a->console);
@@ -2322,6 +2634,8 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
 }
 
 static void app_shutdown(App* a) {
+    app_profile_capture(a);
+    app_profile_save(a);
     steam_bridge_shutdown();
     if (a->ed) { editor_shutdown(a->ed); free(a->ed); a->ed = NULL; }
     if (a->net) { net_close(a->net); free(a->net); a->net = NULL; }
@@ -2487,6 +2801,130 @@ static void run_selftest(App* a) {
         }
     }
 
+    /* deterministic vehicle test: spawn all classes, board, drive, fire
+     * without using player ammo, destroy, and respawn. */
+    bool vehicle_ok = false;
+    {
+        Game* g = a->game;
+        int saved_mode = g->game_mode;
+        static bool saved_active[MAX_PLAYERS];
+        static bool saved_bot[MAX_PLAYERS];
+        for (int i = 0; i < g->num_players; i++) {
+            saved_active[i] = g->players[i].active;
+            saved_bot[i] = g->players[i].bot;
+        }
+        game_set_mode(g, GM_VCTF);
+        game_reset(g);
+        int pi = (g->local_player >= 0 && g->local_player < g->num_players) ? g->local_player : 0;
+        for (int i = 0; i < g->num_players; i++) if (i != pi) g->players[i].active = false;
+        Player* p = &g->players[pi];
+        p->active = true; p->bot = false; p->alive = true;
+        p->health = 100.0f; p->protection = 0.0f; p->respawn_timer = 0.0f;
+        p->in_vehicle = false; p->vehicle = -1; p->use_latch = false;
+        memset(&p->input, 0, sizeof(p->input));
+        g->start_countdown = 0.0f;
+        g->paused = false;
+
+        bool type_seen[VEH_COUNT] = { false, false, false };
+        int scorp = -1;
+        for (int i = 0; i < g->vehicle_count; i++) {
+            Vehicle* v = &g->vehicles[i];
+            if (!v->active) continue;
+            if (v->type >= 0 && v->type < VEH_COUNT) type_seen[v->type] = true;
+            if (v->type == 0 && scorp < 0) scorp = i;
+        }
+        int seen = 0;
+        for (int t = 0; t < VEH_COUNT; t++) if (type_seen[t]) seen++;
+        bool spawn_ok = g->vehicle_count >= VEH_COUNT && seen == VEH_COUNT && scorp >= 0;
+
+        bool enter_ok = false, drive_ok = false, fire_ok = false, module_ok = false;
+        bool destroy_ok = false, respawn_ok = false;
+        if (spawn_ok) {
+            Vehicle* v = &g->vehicles[scorp];
+            p->pos = v->pos;
+            p->vel = v3(0, 0, 0);
+            p->grounded = true;
+            p->use_latch = false;
+            memset(&p->input, 0, sizeof(p->input));
+            p->input.use = true;
+            game_update(g, 1.0f / 60.0f);
+            enter_ok = p->in_vehicle && p->vehicle == scorp && v->driver == p->id;
+            memset(&p->input, 0, sizeof(p->input));
+
+            if (enter_ok) {
+                Vec3 before = p->pos;
+                Vec3 tocentre = v3(-v->pos.x, 0, -v->pos.z);
+                if (v3len(tocentre) > 0.5f) {
+                    tocentre = v3norm(tocentre);
+                    p->yaw = atan2f(tocentre.x, -tocentre.z);
+                }
+                for (int f = 0; f < 45; f++) {
+                    memset(&p->input, 0, sizeof(p->input));
+                    p->input.move_z = 1.0f;
+                    p->input.yaw = p->yaw;
+                    game_update(g, 1.0f / 60.0f);
+                }
+                Vec3 moved = v3sub(p->pos, before);
+                float dist = sqrtf(moved.x * moved.x + moved.z * moved.z);
+                drive_ok = dist > 1.0f;
+
+                memset(&p->input, 0, sizeof(p->input));
+                v->fire_timer = 0.0f;
+                int ammo_before = p->ammo[p->weapon];
+                int projs_before = 0;
+                for (int i = 0; i < MAX_PROJECTILES; i++) if (g->projs[i].active) projs_before++;
+                game_fire(g, p, false);
+                int projs_after = 0;
+                for (int i = 0; i < MAX_PROJECTILES; i++) if (g->projs[i].active) projs_after++;
+                fire_ok = projs_after == projs_before + 1 && p->ammo[p->weapon] == ammo_before;
+
+                int attacker = -1;
+                for (int i = 1; i < g->num_players; i++) {
+                    if (i == pi) continue;
+                    if (g->players[i].team != v->team) { attacker = i; break; }
+                }
+                if (attacker < 0) attacker = (pi + 1) % g->num_players;
+                Vec3 blow = v3(v->pos.x, v->pos.y + 0.7f, v->pos.z);
+
+                /* Modular damage: a destroyed wheel must not kill the vehicle,
+                 * and a destroyed weapon must block fire without ammo use. */
+                game_damage_vehicle_part(g, scorp, 160.0f, attacker, blow, 0);
+                bool wheel_ok = v->active && v->modules[0].destroyed && v->hp > 0.0f;
+                v->fire_timer = 0.0f;
+                game_damage_vehicle_part(g, scorp, 160.0f, attacker, blow, VEH_WEAPON);
+                int projs_gun_before = 0;
+                for (int i = 0; i < MAX_PROJECTILES; i++) if (g->projs[i].active) projs_gun_before++;
+                game_fire(g, p, false);
+                int projs_gun_after = 0;
+                for (int i = 0; i < MAX_PROJECTILES; i++) if (g->projs[i].active) projs_gun_after++;
+                bool weapon_ok = v->active && v->modules[VEH_WEAPON].destroyed &&
+                                 projs_gun_after == projs_gun_before;
+                module_ok = wheel_ok && weapon_ok;
+
+                game_damage_vehicle(g, scorp, 99999.0f, attacker, blow);
+                destroy_ok = !v->active && v->driver < 0 && !p->in_vehicle &&
+                             p->vehicle == -1 && v->respawn > 0.0f;
+                v->respawn = 0.02f;
+                for (int f = 0; f < 4; f++) game_update(g, 1.0f / 60.0f);
+                respawn_ok = v->active && v->hp >= v->max_hp - 0.01f && v->driver < 0 &&
+                             !v->modules[0].destroyed && !v->modules[VEH_WEAPON].destroyed;
+            }
+        }
+        printf("[selftest] vehicle: types=%d spawn=%s enter=%s drive=%s fire=%s module=%s destroy=%s respawn=%s\n",
+               seen, spawn_ok ? "ok" : "FAILED", enter_ok ? "ok" : "FAILED",
+               drive_ok ? "ok" : "FAILED", fire_ok ? "ok" : "FAILED",
+               module_ok ? "ok" : "FAILED",
+               destroy_ok ? "ok" : "FAILED", respawn_ok ? "ok" : "FAILED");
+        vehicle_ok = spawn_ok && enter_ok && drive_ok && fire_ok && module_ok && destroy_ok && respawn_ok;
+
+        for (int i = 0; i < g->num_players; i++) {
+            g->players[i].active = saved_active[i];
+            g->players[i].bot = saved_bot[i];
+        }
+        game_set_mode(g, saved_mode);
+        game_reset(g);
+    }
+
     /* game mode / scale smoke tests */
     bool modes_ok = true;
     const int test_modes[] = { GM_DM, GM_TDM, GM_CTF, GM_VCTF, GM_ASSAULT, GM_ONSLAUGHT, GM_CONQUEST, GM_RPG, GM_BATTLE_ROYALE };
@@ -2514,6 +2952,115 @@ static void run_selftest(App* a) {
                g->node_count, g->vehicle_count, (g->flags[0].active ? 1 : 0) + (g->flags[1].active ? 1 : 0), g->zone_radius);
         modes_ok = modes_ok && ok;
     }
+    /* RPG/Druid upgrades + match-end reward payout */
+    bool rpg_ok = false, reward_ok = false;
+    {
+        Game* g = a->game;
+        game_set_mode(g, GM_DM);
+        game_reset(g);
+        Player* p = &g->players[g->local_player];
+        p->credits = 200000;
+        int base_hp = (int)game_player_max_health(p);
+        int base_ammo = game_player_ammo_max(p, WPN_AR);
+        float base_dmg = game_player_damage_mult(p);
+        float base_fire = game_player_fire_mult(p);
+        float base_spd = game_player_speed_mult(p);
+        int buys = 0;
+        for (int k = 0; k < UPG_COUNT; k++) if (game_upgrade_buy(g, p, k)) buys++;
+        bool effects = game_player_max_health(p) > base_hp + 1.0f &&
+                       game_player_ammo_max(p, WPN_AR) > base_ammo &&
+                       game_player_damage_mult(p) > base_dmg + 0.01f &&
+                       game_player_fire_mult(p) < base_fire - 0.01f &&
+                       game_player_speed_mult(p) > base_spd + 0.01f &&
+                       p->upg[UPG_VAMP] >= 1 && p->upg[UPG_ARMOR] >= 1;
+        int spent = 200000 - p->credits;
+        rpg_ok = buys == UPG_COUNT && effects && spent > 0;
+        printf("[selftest] rpg: bought=%d/%d spent=%d hp=%.0f ammo=%d dmg=%.2f fire=%.2f spd=%.2f %s\n",
+               buys, UPG_COUNT, spent, game_player_max_health(p), game_player_ammo_max(p, WPN_AR),
+               game_player_damage_mult(p), game_player_fire_mult(p), game_player_speed_mult(p),
+               rpg_ok ? "ok" : "FAILED");
+        /* force a match end and verify the payout + rank progression */
+        p->score_points = 0;
+        p->career_points = 0;
+        p->rank = 0;
+        g->winner = g->local_player;
+        g->match_over = true;
+        g->rewards_granted = false;
+        g->match_over_t = 0.0f;
+        for (int k = 0; k < 10; k++) app_frame(a, 1.0f / 60.0f);
+        reward_ok = g->rewards_granted && p->score_points > 0 && p->credits > 0 &&
+                    p->career_points > 0 && p->rank > 0;
+        printf("[selftest] rewards: granted=%d points=%d credits=%d career=%d rank=%s %s\n",
+               g->rewards_granted ? 1 : 0, p->score_points, p->credits, p->career_points,
+               game_rank_name(p->rank), reward_ok ? "ok" : "FAILED");
+        game_set_mode(g, GM_DM);
+        game_reset(g);
+    }
+
+    /* procedural nature + 1000 ambient citizens (GTA-style living world) */
+    bool nature_ok = false;
+    {
+        Game* g = a->game;
+        Uint32 t0 = SDL_GetTicks();
+        int got = game_set_ambient(g, 1000);
+        Uint32 t1 = SDL_GetTicks();
+        for (int i = 0; i < 120; i++) {
+            app_frame(a, 1.0f / 60.0f);
+            app_render(a);
+            SDL_GL_SwapWindow(a->win);
+            reset_frame_edges(a);
+        }
+        int active = game_ambient_active(g);
+        int moving = 0;
+        for (int i = 0; i < g->ambient_count; i++) {
+            AmbientNpc* n = &g->ambient[i];
+            if (n->active && (fabsf(n->vel.x) + fabsf(n->vel.z)) > 0.02f) moving++;
+        }
+        nature_ok = got == 1000 && active >= 900 && moving > 100 &&
+                    g->tree_count >= 40 && g->critter_count >= 8;
+        printf("[selftest] nature: trees=%d critters=%d ambient=%d/%d moving=%d gen=%.1fms %s\n",
+               g->tree_count, g->critter_count, active, got, moving, (float)(t1 - t0),
+               nature_ok ? "ok" : "FAILED");
+    }
+
+    /* zombie invasion: 1000 reused player slots, wave director, AI budget */
+    bool invasion_ok = false;
+    {
+        Game* g = a->game;
+        game_set_mode(g, GM_INVASION);
+        game_reset(g);
+        g->start_countdown = 0.0f;
+        int survivors = game_invasion_survivors_alive(g);
+        Uint32 t0 = SDL_GetTicks();
+        int spawned = game_horde(g, 1000);
+        Uint32 t1 = SDL_GetTicks();
+        int zc = 0, zactive = 0;
+        for (int i = 0; i < g->num_players; i++) {
+            if (g->players[i].zombie) zc++;
+            if (g->players[i].zombie && g->players[i].active && g->players[i].alive) zactive++;
+        }
+        /* let the horde move, attack and path for ~2 seconds */
+        for (int i = 0; i < 120; i++) app_frame(a, 1.0f / 60.0f);
+        int moved = 0;
+        for (int i = 0; i < g->num_players; i++) {
+            Player* p = &g->players[i];
+            if (!p->zombie || !p->active) continue;
+            if (fabsf(p->vel.x) + fabsf(p->vel.z) > 0.05f) moved++;
+        }
+        int w0 = g->invasion_wave;
+        game_next_wave(g);
+        bool wave_ok = g->invasion_wave == w0 + 1;
+        invasion_ok = spawned >= 900 && zc >= 900 && zactive >= 900 && moved > 300 &&
+                      survivors >= 1 && g->num_players > survivors && wave_ok;
+        printf("[selftest] invasion: spawned=%d slots=%d active=%d moved=%d survivors=%d wave=%d/%d spawn=%.1fms %s\n",
+               spawned, zc, zactive, moved, survivors, g->invasion_wave, g->invasion_wave_max,
+               (float)(t1 - t0), invasion_ok ? "ok" : "FAILED");
+        /* leave the horde for the next test blocks to clean up */
+        game_set_mode(g, GM_DM);
+        game_set_player_count(g, 5);
+        game_reset(g);
+    }
+
     /* big-match scale + PlanetSide zones / Metin2 channels */
     game_set_mode(a->game, GM_CONQUEST);
     game_set_player_count(a->game, 256);
@@ -2589,7 +3136,8 @@ static void run_selftest(App* a) {
     printf("[selftest] gl errors: 0x%x\n", glerr);
     bool nav_ok = navreach > nav / 2 && hintnodes > 0;
     printf("[selftest] %s\n", (menu_png && game_png && editor_png && editor_ok && load_ok && net_ok && pie_ok &&
-                               modes_ok && zones_ok && nav_ok && move_ok && glerr == GL_NO_ERROR) ? "PASS" : "FAIL");
+                               modes_ok && zones_ok && rpg_ok && reward_ok && nature_ok && invasion_ok && nav_ok && move_ok && vehicle_ok &&
+                               glerr == GL_NO_ERROR) ? "PASS" : "FAIL");
     a->running = false;
 }
 
@@ -2632,8 +3180,28 @@ static bool run_bottest(App* a, int seconds) {
     }
 
     int frames = seconds * 60;
+    int max_in_vehicle = 0;
+    static bool entered_vehicle[MAX_PLAYERS];
+    static float min_veh_dist[MAX_PLAYERS];
+    memset(entered_vehicle, 0, sizeof(entered_vehicle));
+    for (int i = 0; i < MAX_PLAYERS; i++) min_veh_dist[i] = 1e9f;
     for (int f = 0; f < frames; f++) {
         app_frame(a, 1.0f / 60.0f);
+        int in_veh_now = 0;
+        for (int i = 0; i < n; i++) {
+            Player* p = &g->players[i];
+            if (p->active && p->alive && p->in_vehicle) {
+                in_veh_now++;
+                entered_vehicle[i] = true;
+            }
+            int vt = p->bot_vehicle_target;
+            if (vt >= 0 && vt < g->vehicle_count) {
+                float dx = g->vehicles[vt].pos.x - p->pos.x, dz = g->vehicles[vt].pos.z - p->pos.z;
+                float d = sqrtf(dx * dx + dz * dz);
+                if (d < min_veh_dist[i]) min_veh_dist[i] = d;
+            }
+        }
+        if (in_veh_now > max_in_vehicle) max_in_vehicle = in_veh_now;
         if ((f + 1) % 60 != 0) continue;
         for (int i = 0; i < n; i++) {
             Player* p = &g->players[i];
@@ -2700,10 +3268,23 @@ static bool run_bottest(App* a, int seconds) {
     int frags = 0, deaths = 0;
     for (int i = 0; i < n; i++) { frags += g->players[i].frags; deaths += g->players[i].deaths; }
 
+    int veh_active = 0, veh_types = 0, veh_entered = 0;
+    bool type_seen[VEH_COUNT] = { false, false, false };
+    for (int i = 0; i < g->vehicle_count; i++) {
+        Vehicle* v = &g->vehicles[i];
+        if (!v->active) continue;
+        veh_active++;
+        if (v->type >= 0 && v->type < VEH_COUNT) type_seen[v->type] = true;
+    }
+    for (int t = 0; t < VEH_COUNT; t++) if (type_seen[t]) veh_types++;
+    for (int i = 0; i < n; i++) if (entered_vehicle[i]) veh_entered++;
+
     bool move_ok = total_alive > 0 && move_pct >= 25.0f;
     bool dist_ok = avg_travel >= 3.0f;
     bool nav_ok = path_pct >= 90 && visited >= need_nodes;
     bool bots_ok = bots > 0 && active_bots == bots;
+    bool vehicle_mode = g->game_mode == GM_VCTF || g->game_mode == GM_ONSLAUGHT || g->game_mode == GM_CONQUEST;
+    bool vehicle_ok = !vehicle_mode || (veh_active >= 2 && veh_types >= 2 && veh_entered >= 1);
 
     printf("[bottest] sim=%ds mode=%s players=%d bots=%d nav=%d\n",
            seconds, game_mode_short(g->game_mode), n, bots, g->nav.count);
@@ -2715,19 +3296,23 @@ static bool run_bottest(App* a, int seconds) {
            visited, g->nav.count, need_nodes);
     printf("[bottest] combat: frags=%d deaths=%d score=%.0f:%.0f\n",
            frags, deaths, (float)g->team_score[0], (float)g->team_score[1]);
+    printf("[bottest] vehicles: active=%d/%d types=%d drivers=%d max_drivers=%d%s\n",
+           veh_active, g->vehicle_count, veh_types, veh_entered, max_in_vehicle,
+           vehicle_mode ? "" : " (mode has no vehicles)");
     for (int i = 0; i < n && i < 8; i++) {
         Player* p = &g->players[i];
         if (!p->active) continue;
-        printf("[bottest] slot %d %-12s travel=%.1f move=%d%% stuck=%d%% alive=%s\n",
+        printf("[bottest] slot %d %-12s travel=%.1f move=%d%% stuck=%d%% alive=%s veh_target=%d min_veh_dist=%.1f\n",
                i, p->name, travel[i],
                alive_samples[i] ? moved_samples[i] * 100 / alive_samples[i] : 0,
                alive_samples[i] ? stuck_samples[i] * 100 / alive_samples[i] : 0,
-               p->alive ? "yes" : "no");
+               p->alive ? "yes" : "no", p->bot_vehicle_target, min_veh_dist[i] > 1e8f ? -1.0f : min_veh_dist[i]);
     }
-    bool ok = move_ok && dist_ok && nav_ok && bots_ok;
-    printf("[bottest] checks: movement=%s distance=%s navigation=%s all_bots=%s\n",
+    bool ok = move_ok && dist_ok && nav_ok && bots_ok && vehicle_ok;
+    printf("[bottest] checks: movement=%s distance=%s navigation=%s all_bots=%s vehicles=%s\n",
            move_ok ? "ok" : "FAIL", dist_ok ? "ok" : "FAIL",
-           nav_ok ? "ok" : "FAIL", bots_ok ? "ok" : "FAIL");
+           nav_ok ? "ok" : "FAIL", bots_ok ? "ok" : "FAIL",
+           vehicle_ok ? "ok" : "FAIL");
     printf("[bottest] %s\n", ok ? "PASS" : "FAIL");
     a->running = false;
     return ok;
@@ -2947,8 +3532,8 @@ int main(int argc, char** argv) {
     }
 
     if (cli_stats && a->mode == MODE_GAME && a->game) {
-        printf("[stats] elapsed=%.1fs players=%d navnodes=%d net=%s mode=%s score=%.0f:%.0f\n",
-               elapsed, a->game->num_players, a->game->nav.count,
+        printf("[stats] elapsed=%.1fs players=%d navnodes=%d vehicles=%d net=%s mode=%s score=%.0f:%.0f\n",
+               elapsed, a->game->num_players, a->game->nav.count, a->game->vehicle_count,
                a->game->server_mode ? "host" : (a->game->networked ? "client" : "local"),
                game_mode_short(a->game->game_mode),
                (float)a->game->team_score[0], (float)a->game->team_score[1]);
@@ -2959,9 +3544,19 @@ int main(int argc, char** argv) {
         }
         for (int i = 0; i < a->game->num_players; i++) {
             Player* p = &a->game->players[i];
-            printf("[stats] slot %d  %-16s  frags=%d deaths=%d  bot=%d alive=%d  pos=%.1f,%.1f,%.1f  weapon=%d\n",
+            printf("[stats] slot %d  %-16s  frags=%d deaths=%d  bot=%d alive=%d  pos=%.1f,%.1f,%.1f  weapon=%d  veh=%d\n",
                    i, p->name[0] ? p->name : "?", p->frags, p->deaths, p->bot ? 1 : 0, p->alive ? 1 : 0,
-                   p->pos.x, p->pos.y, p->pos.z, p->weapon);
+                   p->pos.x, p->pos.y, p->pos.z, p->weapon, p->in_vehicle ? p->vehicle : -1);
+        }
+        for (int i = 0; i < a->game->vehicle_count; i++) {
+            Vehicle* v = &a->game->vehicles[i];
+            printf("[stats] vehicle %d  %-8s team=%d active=%d driver=%d hp=%.0f/%.0f pos=%.1f,%.1f,%.1f modules=%c%c%c%c/%c%c\n",
+                   i, game_vehicle_name(v->type), v->team, v->active ? 1 : 0, v->driver,
+                   v->hp, v->max_hp, v->pos.x, v->pos.y, v->pos.z,
+                   v->modules[0].destroyed ? 'x' : 'o', v->modules[1].destroyed ? 'x' : 'o',
+                   v->modules[2].destroyed ? 'x' : 'o', v->modules[3].destroyed ? 'x' : 'o',
+                   v->modules[VEH_ENGINE].destroyed ? 'x' : 'o',
+                   v->modules[VEH_WEAPON].destroyed ? 'x' : 'o');
         }
     }
     app_shutdown(a);

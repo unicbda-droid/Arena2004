@@ -9,6 +9,9 @@
 #include <SDL2/SDL.h>
 
 static uint32_t now_ms(void) { return (uint32_t)SDL_GetTicks(); }
+static float net_frand(float a, float b) {
+    return a + (b - a) * ((float)rand() / (float)RAND_MAX);
+}
 
 static plat_socket_t udp_socket(int port) {
     plat_socket_t s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -240,12 +243,183 @@ static void apply_snapshot(Net* n, Game* g) {
         p->deaths = sp->deaths;
         p->weapon = sp->weapon;
         p->alive = sp->alive;
+        p->death_time = sp->death_time;
         p->bot = sp->bot;
         p->active = sp->active;
+        p->zombie = sp->zombie != 0;
+        p->zombie_type = sp->zombie_type < 4 ? sp->zombie_type : 0;
         if (p->weapon >= 0 && p->weapon < WPN_COUNT) p->has[p->weapon] = true;
         p->has[WPN_AR] = true;
         for (int w = 0; w < WPN_COUNT && w < 8; w++) p->ammo[w] = sp->ammo[w];
         str_copy(p->name, sp->name, sizeof(p->name));
+    }
+    /* host-authoritative wave director state */
+    g->invasion_wave = n->wave;
+    g->invasion_wave_max = 12;
+    g->invasion_alive = n->hostiles;
+    g->invasion_spawn_left = n->queued;
+    g->invasion_survivors = n->survivors;
+}
+
+/* ------------------------------------------------------------------ */
+/* vehicle replication                                                 */
+/* ------------------------------------------------------------------ */
+static void net_vehicle_apply(Net* n, Game* g, const PktVehicle* arr, int count) {
+    if (!n || !g || !arr) return;
+    if (count < 0) count = 0;
+    if (count > PKT_MAX_VEHICLES) count = PKT_MAX_VEHICLES;
+    if (count > MAX_VEHICLES) count = MAX_VEHICLES;
+
+    /* The client may have started in a different mode, so grow or trim the
+     * local pool to match the host before copying state. */
+    while (g->vehicle_count < count) {
+        int i = g->vehicle_count;
+        int idx = game_spawn_vehicle_type(g, arr[i].team <= 1 ? arr[i].team : -1,
+                                          arr[i].type < VEH_COUNT ? arr[i].type : 0);
+        if (idx < 0) break;
+    }
+    if (g->vehicle_count > count) g->vehicle_count = count;
+
+    bool first = !n->veh_have;
+    for (int i = 0; i < g->vehicle_count; i++) {
+        const PktVehicle* s = &arr[i];
+        Vehicle* v = &g->vehicles[i];
+        NetVehicleState* t = &n->veh[i];
+        t->x = s->x; t->y = s->y; t->z = s->z;
+        t->yaw = s->yaw; t->pitch = s->pitch;
+        t->hp = s->hp; t->max_hp = s->max_hp > 0.0f ? s->max_hp : 1.0f;
+        t->respawn = s->respawn;
+        t->driver = s->driver;
+        t->type = s->type < VEH_COUNT ? s->type : 0;
+        t->team = s->team <= 1 ? s->team : -1;
+        t->active = s->active != 0;
+        for (int k = 0; k < VEH_MODULES; k++) t->module[k] = s->module[k];
+
+        v->type = t->type;
+        v->team = t->team;
+        v->max_hp = t->max_hp;
+        v->hp = clampf(t->hp, 0.0f, t->max_hp);
+        v->respawn = t->respawn;
+        v->active = t->active;
+        v->driver = t->driver;
+        for (int k = 0; k < VEH_MODULES; k++) {
+            float maxh = game_vehicle_module_max_hp(v->type, k);
+            v->modules[k].max_hp = maxh;
+            v->modules[k].hp = maxh * (float)t->module[k] / 255.0f;
+            v->modules[k].destroyed = t->module[k] == 0;
+        }
+        if (first) {
+            v->pos = v3(t->x, t->y, t->z);
+            v->home = v->pos;
+            v->yaw = t->yaw;
+            v->pitch = t->pitch;
+        }
+    }
+    n->veh_count = count;
+    n->veh_have = true;
+    n->veh_age = 0.0f;
+}
+
+/* Interpolate empty vehicles between 15 Hz host updates. Driven vehicles are
+ * positioned by the player snapshots (update_vehicles does that), so here we
+ * only keep the driver flags and steal/eject rules in sync. */
+static void net_vehicles_tick(Net* n, Game* g, float dt) {
+    if (!n || !g || n->role != NET_ROLE_CLIENT || !n->veh_have) return;
+    int count = n->veh_count;
+    if (count > g->vehicle_count) count = g->vehicle_count;
+    if (count > MAX_VEHICLES) count = MAX_VEHICLES;
+    float a = clampf(dt * 14.0f, 0.05f, 1.0f);
+    Player* lp = (g->local_player >= 0 && g->local_player < g->num_players)
+                 ? &g->players[g->local_player] : NULL;
+    for (int i = 0; i < count; i++) {
+        const NetVehicleState* s = &n->veh[i];
+        Vehicle* v = &g->vehicles[i];
+        bool was_active = v->active;
+        v->type = s->type;
+        v->team = s->team;
+        v->max_hp = s->max_hp;
+        v->hp = clampf(s->hp, 0.0f, s->max_hp);
+        v->respawn = s->respawn;
+        v->active = s->active;
+        v->driver = s->driver;
+        for (int k = 0; k < VEH_MODULES; k++) {
+            float maxh = game_vehicle_module_max_hp(v->type, k);
+            v->modules[k].max_hp = maxh;
+            v->modules[k].hp = maxh * (float)s->module[k] / 255.0f;
+            v->modules[k].destroyed = s->module[k] == 0;
+        }
+        if (was_active && !s->active) {
+            /* remote destruction: visual-only explosion, no local damage */
+            Color ec = s->team == 0 ? col3(1.0f, 0.35f, 0.2f) : col3(0.3f, 0.8f, 1.0f);
+            Vec3 ep = v3(s->x, s->y + 0.8f, s->z);
+            for (int k = 0; k < 22; k++) {
+                Vec3 d = v3norm(v3(net_frand(-1, 1), net_frand(-0.2f, 1), net_frand(-1, 1)));
+                game_add_particle(g, ep, v3mul(d, net_frand(3.0f, 11.0f)), ec,
+                                  net_frand(0.15f, 0.5f), net_frand(0.4f, 1.0f), true, 5.0f, 1.2f);
+            }
+            Player* lp2 = (g->local_player >= 0 && g->local_player < g->num_players)
+                          ? &g->players[g->local_player] : NULL;
+            if (lp2) {
+                float dx = s->x - lp2->pos.x, dz = s->z - lp2->pos.z;
+                if (dx * dx + dz * dz < 90.0f * 90.0f) audio_play(SFX_EXPLODE, 0.8f, 0.0f);
+            }
+        }
+        if (s->driver >= 0 && s->driver < g->num_players) {
+            g->players[s->driver].in_vehicle = true;
+            g->players[s->driver].vehicle = i;
+        }
+        /* Host authority: if the local player sits in a vehicle that the host
+         * says is destroyed or driven by somebody else, eject locally. */
+        if (lp && lp->in_vehicle && lp->vehicle == i &&
+            (!s->active || (s->driver >= 0 && s->driver != lp->id))) {
+            lp->in_vehicle = false;
+            lp->vehicle = -1;
+        }
+        if (s->active) {
+            v->pos.x = lerpf(v->pos.x, s->x, a);
+            v->pos.y = lerpf(v->pos.y, s->y, a);
+            v->pos.z = lerpf(v->pos.z, s->z, a);
+            v->yaw = angle_lerp(v->yaw, s->yaw, a);
+            v->pitch = lerpf(v->pitch, s->pitch, a);
+        }
+    }
+}
+
+static void net_send_vehicles(Net* n, Game* g) {
+    if (!n || !g) return;
+    unsigned char buf[NET_MAX_PKT];
+    int count = g->vehicle_count;
+    if (count < 0) count = 0;
+    if (count > PKT_MAX_VEHICLES) count = PKT_MAX_VEHICLES;
+    PktVehHead* head = (PktVehHead*)buf;
+    memset(head, 0, sizeof(*head));
+    head->count = (uint8_t)count;
+    head->frame = (uint8_t)(n->veh_frame_out + 1);
+    n->veh_frame_out = head->frame;
+    PktVehicle* arr = (PktVehicle*)(buf + sizeof(PktVehHead));
+    for (int i = 0; i < count; i++) {
+        Vehicle* v = &g->vehicles[i];
+        PktVehicle* o = &arr[i];
+        memset(o, 0, sizeof(*o));
+        o->x = v->pos.x; o->y = v->pos.y; o->z = v->pos.z;
+        o->yaw = v->yaw; o->pitch = v->pitch;
+        o->hp = v->hp; o->max_hp = v->max_hp;
+        o->respawn = v->respawn;
+        o->driver = v->driver;
+        o->type = (uint8_t)(v->type < 0 || v->type >= VEH_COUNT ? 0 : v->type);
+        o->team = (uint8_t)(v->team < 0 ? 255 : v->team);
+        o->active = v->active ? 1 : 0;
+        for (int k = 0; k < VEH_MODULES; k++) {
+            float mh = v->modules[k].max_hp > 0.0f ? v->modules[k].max_hp : 1.0f;
+            float f = clampf(v->modules[k].hp / mh, 0.0f, 1.0f);
+            o->module[k] = (uint8_t)(f * 255.0f + 0.5f);
+        }
+    }
+    int len = (int)(sizeof(PktVehHead) + (size_t)count * sizeof(PktVehicle));
+    if (n->use_lobby) send_to(n, &n->lobby_addr, PKT_VEHICLES, 0, ++n->seq, 0, buf, len);
+    else {
+        for (int i = 0; i < PKT_MAX_PLAYERS; i++)
+            if (n->remote_alive[i]) send_to(n, &n->peers[i], PKT_VEHICLES, 0, ++n->seq, 0, buf, len);
     }
 }
 
@@ -409,6 +583,10 @@ void net_poll(Net* n, Game* g, float dt) {
                     n->snap_count = total;
                     n->have_snapshot = false;
                 }
+                n->wave = sh->wave;
+                n->hostiles = sh->hostiles;
+                n->queued = sh->queued;
+                n->survivors = sh->survivors;
                 if (cnt > 0 && plen >= (int)(sizeof(PktSnapHead) + cnt * sizeof(PktPlayer))) {
                     memcpy(&n->snap[start], payload + sizeof(PktSnapHead), cnt * sizeof(PktPlayer));
                     for (int k = 0; k < cnt; k++) n->snap_mask |= (1ull << (start + k));
@@ -419,6 +597,18 @@ void net_poll(Net* n, Game* g, float dt) {
                         n->snap_age = 0;
                         apply_snapshot(n, g);
                     }
+                }
+            }
+            break;
+        case PKT_VEHICLES:
+            if (n->role == NET_ROLE_CLIENT && plen >= (int)sizeof(PktVehHead)) {
+                PktVehHead* vh = (PktVehHead*)payload;
+                int vc = vh->count;
+                if (vc < 0) vc = 0;
+                if (vc > PKT_MAX_VEHICLES) vc = PKT_MAX_VEHICLES;
+                if (plen >= (int)(sizeof(PktVehHead) + (size_t)vc * sizeof(PktVehicle))) {
+                    PktVehicle* arr = (PktVehicle*)(payload + sizeof(PktVehHead));
+                    net_vehicle_apply(n, g, arr, vc);
                 }
             }
             break;
@@ -467,6 +657,7 @@ void net_poll(Net* n, Game* g, float dt) {
             }
         }
     }
+    net_vehicles_tick(n, g, dt);
 }
 
 void net_host_apply(Net* n, Game* g) {
@@ -491,6 +682,11 @@ void net_client_send_input(Net* n, Game* g, PlayerInput in, float dt) {
 
 void net_host_broadcast(Net* n, Game* g, float dt) {
     if (!n || n->role != NET_ROLE_HOST) return;
+    n->veh_accum += dt;
+    if (n->veh_accum >= 1.0f / 15.0f) {
+        n->veh_accum = 0.0f;
+        net_send_vehicles(n, g);
+    }
     n->snap_accum += dt;
     if (n->snap_accum < 1.0f / 20.0f) return;
     n->snap_accum = 0;
@@ -511,6 +707,10 @@ void net_host_broadcast(Net* n, Game* g, float dt) {
         sh->start = (uint8_t)start;
         sh->total = (uint8_t)cnt;
         sh->frame = frame;
+        sh->wave = (uint8_t)(g->invasion_wave > 255 ? 255 : g->invasion_wave);
+        sh->hostiles = (uint8_t)(g->invasion_alive > 255 ? 255 : g->invasion_alive);
+        sh->queued = (uint8_t)(g->invasion_spawn_left > 255 ? 255 : g->invasion_spawn_left);
+        sh->survivors = (uint8_t)(g->invasion_survivors > 255 ? 255 : g->invasion_survivors);
         PktPlayer* pp = (PktPlayer*)(buf + sizeof(PktSnapHead));
         for (int k = 0; k < chunk; k++) {
             int i = start + k;
@@ -524,9 +724,12 @@ void net_host_broadcast(Net* n, Game* g, float dt) {
             for (int w = 0; w < WPN_COUNT && w < 8; w++) o->ammo[w] = (uint16_t)clampf((float)p->ammo[w], 0, 999);
             o->weapon = (uint8_t)(p->weapon < 0 ? 0 : p->weapon);
             o->alive = p->alive ? 1 : 0;
+            o->death_time = p->death_time;
             o->bot = p->bot ? 1 : 0;
             o->active = p->active ? 1 : 0;
             o->is_local = (i == g->local_player) ? 1 : 0;
+            o->zombie = p->zombie ? 1 : 0;
+            o->zombie_type = (uint8_t)(p->zombie_type < 0 || p->zombie_type > 3 ? 0 : p->zombie_type);
             str_copy(o->name, p->name, sizeof(o->name));
         }
         int len = (int)(sizeof(PktSnapHead) + chunk * sizeof(PktPlayer));

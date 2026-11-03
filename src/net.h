@@ -10,6 +10,17 @@
 typedef enum { NET_ROLE_NONE = 0, NET_ROLE_HOST, NET_ROLE_CLIENT } NetRole;
 
 typedef struct {
+    float x, y, z;
+    float yaw, pitch;
+    float hp, max_hp;
+    float respawn;
+    int driver;
+    int type, team;
+    bool active;
+    uint8_t module[VEH_MODULES];
+} NetVehicleState;
+
+typedef struct {
     NetRole role;
     plat_socket_t sock;
     struct sockaddr_in host_addr;   /* client: direct host */
@@ -34,9 +45,18 @@ typedef struct {
     uint64_t snap_mask;      /* received chunks of the current snapshot */
     uint8_t snap_frame;      /* snapshot generation */
     float snap_age;
+    /* invasion state mirrored from the host snapshot */
+    int wave, hostiles, queued, survivors;
+    /* client: latest host vehicle state, interpolated between packets */
+    bool veh_have;
+    int veh_count;
+    NetVehicleState veh[PKT_MAX_VEHICLES];
+    float veh_age;
     /* host: remote players */
     bool remote_alive[PKT_MAX_PLAYERS];
     uint8_t snap_frame_out;
+    uint8_t veh_frame_out;
+    float veh_accum;
     uint32_t remote_last_ms[PKT_MAX_PLAYERS];
     struct sockaddr_in peers[PKT_MAX_PLAYERS];
     /* lobby registration */

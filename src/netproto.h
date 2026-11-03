@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define NET_MAGIC 0x41324B34u   /* "A2K4" */
-#define NET_VERSION 4
+#define NET_VERSION 7
 #define NET_MAX_PKT 1200
 
 typedef enum {
@@ -22,7 +22,8 @@ typedef enum {
     PKT_CODE,
     PKT_FOUND,
     PKT_JOINROOM,
-    PKT_DENIED
+    PKT_DENIED,
+    PKT_VEHICLES
 } PktType;
 
 typedef struct {
@@ -60,6 +61,8 @@ typedef struct {
     uint8_t start;   /* first player slot in this chunk */
     uint8_t total;   /* total players in the snapshot */
     uint8_t frame;   /* snapshot generation, wraps at 255 */
+    /* invasion wave state, identical for every chunk of the snapshot */
+    uint8_t wave, hostiles, queued, survivors;
 } PktSnapHead;
 
 typedef struct {
@@ -73,13 +76,41 @@ typedef struct {
     uint8_t bot;
     uint8_t active;
     uint8_t is_local;
-    uint8_t pad[3];
+    uint8_t zombie;     /* invasion zombie slot */
+    uint8_t zombie_type;/* 0 walker, 1 runner, 2 brute, 3 spitter */
+    uint8_t pad;
+    float death_time;   /* corpse age: same dissolve on every client */
     char name[16];
 } PktPlayer;
 
 /* UT2004 listen-server scale. A single snapshot is split into chunks so it
  * always fits into NET_MAX_PKT. */
 #define PKT_MAX_PLAYERS 32
+
+/* Vehicle state is sent as its own compact packet at 15 Hz. 16 vehicles
+ * (the engine limit) fit into one datagram without chunking. */
+#define PKT_MAX_VEHICLES 16
+
+typedef struct {
+    uint8_t count;
+    uint8_t frame;
+    uint8_t pad[2];
+} PktVehHead;
+
+typedef struct {
+    float x, y, z;
+    float yaw, pitch;
+    float hp, max_hp;
+    float respawn;      /* remaining wreck time, identical on all clients */
+    int32_t driver;
+    uint8_t type;
+    uint8_t team;
+    uint8_t active;
+    uint8_t pad;
+    /* module HP as 0..255 percent (wheels, engine, weapon). Sent so a
+     * client renders the same detached wheels / smoke / dead barrel. */
+    uint8_t module[6];
+} PktVehicle;
 
 typedef struct {
     char name[24];

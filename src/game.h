@@ -20,6 +20,9 @@
 #define MAX_VEHICLES 16
 #define MAX_ZONES 32
 #define MAX_CHANNELS 64
+#define MAX_TREES 260
+#define MAX_CRITTERS 64
+#define MAX_AMBIENT 1000
 
 /* UT2004 / Battlefield / PlanetSide inspired match types. */
 typedef enum {
@@ -32,10 +35,23 @@ typedef enum {
     GM_CONQUEST,        /* Battlefield style capture points   */
     GM_RPG,             /* persistent style leveling          */
     GM_BATTLE_ROYALE,   /* shrinking zone, last one standing  */
+    GM_INVASION,        /* zombie waves (Back4Blood / Unreal Invasion) */
     GM_COUNT
 } GameMode;
 
 typedef enum { WPN_AR=0, WPN_SHOCK, WPN_ROCKET, WPN_FLAK, WPN_LIGHTNING, WPN_COUNT } WeaponId;
+
+/* Unreal RPG / Druid style permanent upgrades, bought in the Armory. */
+enum {
+    UPG_DAMAGE = 0,   /* +10% weapon damage per level        */
+    UPG_FIRERATE,     /* faster shooting                      */
+    UPG_HEALTH,       /* +25 max health                       */
+    UPG_AMMO,         /* +15% max ammo                        */
+    UPG_VAMP,         /* vampiric lifesteal on damage dealt   */
+    UPG_SPEED,        /* faster movement                      */
+    UPG_ARMOR,        /* damage reduction                     */
+    UPG_COUNT
+};
 
 typedef struct {
     const char* name;
@@ -101,9 +117,27 @@ typedef struct {
     Color color;
     int level, xp, xp_next;
     float dmg_mult;
+    /* rewards / RPG / item shop */
+    int upg[UPG_COUNT];     /* permanent upgrade levels            */
+    int credits;            /* spendable shop currency             */
+    int score_points;       /* reward points earned this match     */
+    int career_points;      /* persistent career score             */
+    int rank;               /* derived career rank index           */
+    int assists;
+    int last_attacker;      /* for assist attribution              */
+    float last_damage_t;
+    float vamp_flash;       /* HUD feedback for lifesteal          */
     int vehicle;           /* vehicle index or -1 */
     bool in_vehicle;
     float use_latch;
+    int bot_vehicle_target; /* vehicle index a bot wants to board, -1 none */
+    float bot_vehicle_t;    /* cooldown before looking for another vehicle */
+    /* Invasion zombies reuse the player capsule/movement/AI budget. This
+     * lets 1000 zombies share collision, rendering LOD and networking. */
+    bool zombie;
+    int zombie_type;        /* 0 walker, 1 runner, 2 brute, 3 spitter */
+    float zombie_attack;    /* melee/ranged attack cooldown */
+    float zombie_growl;
     /* net */
     int net_owner;
     float last_snapshot_t;
@@ -174,16 +208,51 @@ typedef struct {
     float pulse;
 } ControlNode;
 
+#define VEH_COUNT 3
+/* Modular vehicle damage: four wheels/thrusters, engine and weapon. */
+#define VEH_WHEELS 4
+#define VEH_ENGINE 4
+#define VEH_WEAPON 5
+#define VEH_MODULES 6
+
+typedef struct {
+    float hp, max_hp;
+    bool destroyed;
+} VehicleModule;
+
+typedef struct {
+    const char* name;
+    const char* short_name;
+    float max_hp;
+    float max_speed;       /* horizontal units/s */
+    float accel;           /* acceleration factor */
+    float damage;
+    float splash;
+    float fire_delay;
+    float proj_speed;
+    float gravity;
+    float hit_radius;      /* projectile hit sphere */
+    float mass;            /* rough collision push factor */
+} VehicleDef;
+
+extern const VehicleDef vehicle_defs[VEH_COUNT];
+
 typedef struct {
     bool active;
-    int type;              /* 0 scorpion, 1 manta, 2 tank */
+    int type;              /* 0 scorpion, 1 manta, 2 goliath */
     Vec3 pos, home;
     float yaw;
-    float hp;
+    float pitch;           /* manta nose attitude */
+    float hp, max_hp;
     float respawn;
+    float fire_timer;
+    float hit_flash;
+    float smoke;
     int driver;            /* player id or -1 */
+    int killer;
     int team;
     float bob;
+    VehicleModule modules[VEH_MODULES];
 } Vehicle;
 
 typedef struct {
@@ -201,7 +270,7 @@ typedef struct {
 } NavGraph;
 
 typedef struct {
-    int frags, deaths;
+    int frags, deaths, assists, points, rank;
     char name[32];
     Color color;
     bool bot;
@@ -214,6 +283,31 @@ typedef struct {
     Color color;
 } KillFeedItem;
 
+/* Procedural nature layer: purely decorative, no collision cost. */
+typedef struct {
+    Vec3 pos;
+    float height, radius, phase, sway;
+    int kind;        /* 0 pine, 1 broadleaf, 2 dead tree, 3 bush, 4 rock */
+    int active;
+} NatureProp;
+
+/* Wildlife that roams the arena so the world never feels dead. */
+typedef struct {
+    Vec3 pos, home, vel;
+    float yaw, speed, timer, phase, ground;
+    int kind;        /* 0 wolf, 1 bear, 2 snake, 3 fox, 4 bird */
+    int state;
+    int active;
+} Critter;
+
+/* GTA-style ambient population, lightweight and purely visual. */
+typedef struct {
+    Vec3 pos, home, vel;
+    float yaw, timer, phase;
+    int palette;
+    int active;
+} AmbientNpc;
+
 typedef struct Game {
     World* world;
     Player players[MAX_PLAYERS];
@@ -224,6 +318,9 @@ typedef struct Game {
     bool server_mode;
     bool paused;
     bool match_over;
+    float match_over_t;
+    bool rewards_granted;
+    int reward_total_points, reward_total_credits;
     float match_time, elapsed;
     int frag_limit;
     float time_limit;
@@ -281,6 +378,15 @@ typedef struct Game {
     float zone_radius, zone_target, zone_center_x, zone_center_z, zone_timer;
     int zone_stage, br_alive, br_total;
     float br_tick;
+    /* zombie invasion (Back4Blood / Unreal Invasion) */
+    int invasion_wave, invasion_wave_max;
+    int invasion_spawn_left;      /* zombies still queued for this wave */
+    int invasion_alive, invasion_killed, invasion_score;
+    int invasion_survivors;       /* human/bot slots protected from cleanup */
+    float invasion_wave_timer;    /* intermission / spawn drip */
+    float invasion_spawn_timer;
+    bool invasion_victory;
+    int invasion_best_wave;
     /* mega server zones (PlanetSide style, local zone is simulated) */
     int zone_id, zone_total, zone_count;
     int zone_pop[MAX_ZONES];
@@ -290,6 +396,16 @@ typedef struct Game {
     int chan_id, chan_count, chan_cap;
     int chan_pop[MAX_CHANNELS];
     char chan_label[MAX_CHANNELS][16];
+    /* procedural nature + ambient population */
+    NatureProp trees[MAX_TREES];
+    int tree_count;
+    Critter critters[MAX_CRITTERS];
+    int critter_count;
+    AmbientNpc ambient[MAX_AMBIENT];
+    int ambient_count;
+    int ambient_capacity;
+    bool nature_enabled;
+    float nature_time;
     /* results */
     char result[96];
     float fov;
@@ -312,7 +428,43 @@ void game_set_team(Game* g, int player, int team);
 void game_set_player_count(Game* g, int count);
 int game_alive_count(Game* g);
 void game_spawn_vehicle(Game* g, int team);
+int game_spawn_vehicle_type(Game* g, int team, int type);
+void game_damage_vehicle(Game* g, int vehicle, float dmg, int attacker, Vec3 point);
+void game_damage_vehicle_part(Game* g, int vehicle, float dmg, int attacker, Vec3 point, int part);
+float game_vehicle_module_max_hp(int type, int part);
+const char* game_vehicle_module_name(int part);
+const char* game_vehicle_name(int type);
+const char* game_vehicle_short(int type);
+int game_vehicle_type_from_name(const char* name);
 void game_configure_zones(Game* g, int total_players);
+int game_spawn_zombie(Game* g, int type, Vec3 near);
+int game_horde(Game* g, int count);
+void game_generate_nature(Game* g);
+void game_update_nature(Game* g, float dt);
+void game_render_nature(Game* g, Renderer* r);
+int game_set_ambient(Game* g, int count);
+int game_ambient_active(Game* g);
+void game_next_wave(Game* g);
+int game_invasion_survivors_alive(Game* g);
+const char* game_zombie_name(int type);
+/* RPG / rewards / shop */
+const char* game_upgrade_name(int id);
+const char* game_upgrade_desc(int id);
+int game_upgrade_max(int id);
+int game_upgrade_cost(Player* p, int id);
+bool game_upgrade_buy(Game* g, Player* p, int id);
+float game_player_max_health(Player* p);
+float game_player_max_armor(Player* p);
+int game_player_ammo_max(Player* p, int wi);
+float game_player_speed_mult(Player* p);
+float game_player_fire_mult(Player* p);
+float game_player_damage_mult(Player* p);
+void game_player_refresh_stats(Player* p);
+void game_add_reward(Game* g, Player* p, int points, int credits, const char* reason);
+int game_rank_index(int career_points);
+const char* game_rank_name(int rank);
+const char* game_upgrade_key(int id);
+int game_upgrade_from_name(const char* name);
 void game_select_zone(Game* g, int zone);
 void game_select_channel(Game* g, int chan);
 void game_shutdown(Game* g);

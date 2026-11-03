@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <math.h>
 
@@ -18,6 +19,55 @@ WeaponDef weapon_defs[WPN_COUNT] = {
 };
 
 static const char* BOT_NAMES[] = { "Xan", "Malcolm", "Gorge", "Rapier", "Kragg", "Brock", "Lauren", "Satin", "Visse", "Rylisa" };
+
+/* Vehicle stats. Deliberately simple numbers: ground vehicles use the normal
+ * player movement step, the Manta uses cheap hover motion. This keeps 16
+ * vehicles cheaper than one extra bot and avoids physics spikes. */
+const VehicleDef vehicle_defs[VEH_COUNT] = {
+    /* name       short    hp    speed accel dmg  spl  delay speed grav radius mass */
+    { "Scorpion", "SCORP", 240, 24.0f, 30.0f, 16.0f, 0.0f, 0.11f, 70.0f, 0.0f, 2.1f, 1.0f },
+    { "Manta",    "MANTA", 180, 30.0f, 26.0f, 18.0f, 2.4f, 0.20f, 60.0f, 0.0f, 2.5f, 0.7f },
+    { "Goliath",  "GOLI",  520, 13.0f, 16.0f, 50.0f, 5.0f, 0.95f, 46.0f, 3.0f, 3.7f, 2.4f },
+};
+
+float game_vehicle_module_max_hp(int type, int part) {
+    if (type < 0 || type >= VEH_COUNT) type = 0;
+    if (part < 0 || part >= VEH_MODULES) part = VEH_ENGINE;
+    float base = vehicle_defs[type].max_hp;
+    if (part < VEH_WHEELS) return base * 0.32f;
+    if (part == VEH_ENGINE) return base * 0.45f;
+    return base * 0.30f;
+}
+
+const char* game_vehicle_module_name(int part) {
+    if (part < 0 || part >= VEH_MODULES) return "HULL";
+    if (part < VEH_WHEELS) return "WHEEL";
+    if (part == VEH_ENGINE) return "ENGINE";
+    return "WEAPON";
+}
+
+const char* game_vehicle_name(int type) {
+    if (type < 0 || type >= VEH_COUNT) type = 0;
+    return vehicle_defs[type].name;
+}
+const char* game_vehicle_short(int type) {
+    if (type < 0 || type >= VEH_COUNT) type = 0;
+    return vehicle_defs[type].short_name;
+}
+int game_vehicle_type_from_name(const char* name) {
+    if (!name || !name[0]) return -1;
+    char b[24];
+    str_copy(b, name, sizeof(b));
+    for (int i = 0; b[i]; i++) {
+        if (b[i] >= 'A' && b[i] <= 'Z') b[i] = (char)(b[i] - 'A' + 'a');
+        if (b[i] == ' ' || b[i] == '_' || b[i] == '-') b[i] = 0;
+    }
+    const char* k = b;
+    if (!strcmp(k, "scorpion") || !strcmp(k, "scorp") || !strcmp(k, "buggy") || !strcmp(k, "0")) return 0;
+    if (!strcmp(k, "manta") || !strcmp(k, "flyer") || !strcmp(k, "air") || !strcmp(k, "1")) return 1;
+    if (!strcmp(k, "goliath") || !strcmp(k, "tank") || !strcmp(k, "goli") || !strcmp(k, "2")) return 2;
+    return -1;
+}
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -41,9 +91,10 @@ static Color team_base_color(int team) {
 /* ------------------------------------------------------------------ */
 static const char* MODE_NAMES[GM_COUNT] = {
     "Deathmatch", "Team Deathmatch", "Capture the Flag", "Vehicle CTF",
-    "Assault", "Onslaught", "Conquest", "RPG Deathmatch", "Battle Royale"
+    "Assault", "Onslaught", "Conquest", "RPG Deathmatch", "Battle Royale",
+    "Zombie Invasion"
 };
-static const char* MODE_SHORT[GM_COUNT] = { "DM", "TDM", "CTF", "VCTF", "ASSAULT", "ONSLAUGHT", "CONQUEST", "RPG", "BR" };
+static const char* MODE_SHORT[GM_COUNT] = { "DM", "TDM", "CTF", "VCTF", "ASSAULT", "ONSLAUGHT", "CONQUEST", "RPG", "BR", "INVASION" };
 
 const char* game_mode_name(int mode) {
     if (mode < 0 || mode >= GM_COUNT) mode = GM_DM;
@@ -68,6 +119,8 @@ int game_mode_from_name(const char* name) {
     if (!strcmp(k, "con") || !strcmp(k, "conquest") || !strcmp(k, "battlefield")) return GM_CONQUEST;
     if (!strcmp(k, "rpg")) return GM_RPG;
     if (!strcmp(k, "br") || !strcmp(k, "battleroyale") || !strcmp(k, "royale")) return GM_BATTLE_ROYALE;
+    if (!strcmp(k, "inv") || !strcmp(k, "invasion") || !strcmp(k, "zombie") || !strcmp(k, "zombies") ||
+        !strcmp(k, "survival") || !strcmp(k, "back4blood") || !strcmp(k, "horde")) return GM_INVASION;
     return -1;
 }
 bool game_mode_team_based(int mode) {
@@ -75,9 +128,189 @@ bool game_mode_team_based(int mode) {
            mode == GM_ONSLAUGHT || mode == GM_CONQUEST || mode == GM_RPG;
 }
 
-static float player_max_health(Player* p) {
+/* ------------------------------------------------------------------ */
+/* RPG / Druid style progression, rewards and item shop                */
+/* ------------------------------------------------------------------ */
+static const char* UPG_NAMES[UPG_COUNT] = {
+    "DAMAGE CORE", "OVERCLOCK", "BIO WEAVE", "AMMO BELT",
+    "VAMPIRIC RUNE", "SERVO LEGS", "ARMOR PLATING"
+};
+static const char* UPG_KEYS[UPG_COUNT] = {
+    "damage", "firerate", "health", "ammo", "vamp", "speed", "armor"
+};
+static const char* UPG_DESC[UPG_COUNT] = {
+    "+10% Waffenschaden pro Stufe",
+    "+7% Feuerrate pro Stufe",
+    "+25 max. HP pro Stufe",
+    "+15% Munitionskapazitaet",
+    "2% Lebensraub pro Stufe",
+    "+5% Laufgeschwindigkeit",
+    "-3.5% erlittener Schaden"
+};
+static const int UPG_BASE[UPG_COUNT] = { 80, 90, 70, 70, 120, 80, 90 };
+static const int UPG_MAXV[UPG_COUNT] = { 10, 8, 10, 8, 5, 8, 6 };
+
+const char* game_upgrade_name(int id) { return (id >= 0 && id < UPG_COUNT) ? UPG_NAMES[id] : "?"; }
+const char* game_upgrade_desc(int id) { return (id >= 0 && id < UPG_COUNT) ? UPG_DESC[id] : ""; }
+const char* game_upgrade_key(int id)  { return (id >= 0 && id < UPG_COUNT) ? UPG_KEYS[id] : "?"; }
+int game_upgrade_max(int id) { return (id >= 0 && id < UPG_COUNT) ? UPG_MAXV[id] : 0; }
+int game_upgrade_from_name(const char* name) {
+    if (!name || !name[0]) return -1;
+    for (int i = 0; i < UPG_COUNT; i++)
+        if (!strcasecmp(name, UPG_KEYS[i]) || !strcasecmp(name, UPG_NAMES[i])) return i;
+    if (!strcasecmp(name, "dmg")) return UPG_DAMAGE;
+    if (!strcasecmp(name, "rate") || !strcasecmp(name, "fire")) return UPG_FIRERATE;
+    if (!strcasecmp(name, "hp")) return UPG_HEALTH;
+    if (!strcasecmp(name, "vampire") || !strcasecmp(name, "lifesteal")) return UPG_VAMP;
+    return -1;
+}
+
+int game_upgrade_cost(Player* p, int id) {
+    if (!p || id < 0 || id >= UPG_COUNT) return 999999;
+    int lvl = p->upg[id];
+    if (lvl >= UPG_MAXV[id]) return -1;
+    return UPG_BASE[id] + lvl * (UPG_BASE[id] * 3 / 4);
+}
+
+float game_player_damage_mult(Player* p) {
+    if (!p) return 1.0f;
     int lvl = p->level > 0 ? p->level : 1;
-    return 100.0f + (float)(lvl - 1) * 20.0f;
+    return (1.0f + 0.08f * (float)(lvl - 1)) * (1.0f + 0.10f * (float)p->upg[UPG_DAMAGE]);
+}
+float game_player_fire_mult(Player* p) {
+    if (!p) return 1.0f;
+    return 1.0f / (1.0f + 0.07f * (float)p->upg[UPG_FIRERATE]);
+}
+float game_player_speed_mult(Player* p) {
+    if (!p) return 1.0f;
+    return 1.0f + 0.05f * (float)p->upg[UPG_SPEED];
+}
+float game_player_max_health(Player* p) {
+    int lvl = p->level > 0 ? p->level : 1;
+    return 100.0f + (float)(lvl - 1) * 20.0f + 25.0f * (float)p->upg[UPG_HEALTH];
+}
+float game_player_max_armor(Player* p) {
+    return 100.0f + 20.0f * (float)p->upg[UPG_ARMOR];
+}
+int game_player_ammo_max(Player* p, int wi) {
+    if (wi < 0 || wi >= WPN_COUNT) return 0;
+    float mul = 1.0f + 0.15f * (float)p->upg[UPG_AMMO];
+    return (int)((float)weapon_defs[wi].ammo_max * mul + 0.5f);
+}
+void game_player_refresh_stats(Player* p) {
+    if (!p) return;
+    p->dmg_mult = game_player_damage_mult(p);
+}
+
+bool game_upgrade_buy(Game* g, Player* p, int id) {
+    if (!g || !p || id < 0 || id >= UPG_COUNT) return false;
+    if (p->upg[id] >= UPG_MAXV[id]) return false;
+    int cost = game_upgrade_cost(p, id);
+    if (p->credits < cost) return false;
+    p->credits -= cost;
+    p->upg[id]++;
+    float before = game_player_max_health(p);
+    game_player_refresh_stats(p);
+    if (id == UPG_HEALTH) p->health = fminf(before, p->health + 25.0f);
+    if (p->id == g->local_player) {
+        char b[96];
+        snprintf(b, sizeof(b), "%s LV%d", game_upgrade_name(id), p->upg[id]);
+        game_pickup_msg(g, "%s", b);
+        game_announce(g, b, col3(0.45f, 0.95f, 1.0f), 1.8f);
+        audio_play(SFX_PICKUP_WEAPON, 0.55f, 0.0f);
+    }
+    return true;
+}
+
+int game_rank_index(int career_points) {
+    static const int TH[10] = { 0, 400, 1200, 2800, 5500, 9500, 15000, 23000, 34000, 50000 };
+    int r = 0;
+    for (int i = 0; i < 10; i++) if (career_points >= TH[i]) r = i;
+    return r;
+}
+const char* game_rank_name(int rank) {
+    static const char* R[10] = {
+        "RECRUIT", "PRIVATE", "CORPORAL", "SERGEANT", "LIEUTENANT",
+        "CAPTAIN", "MAJOR", "COLONEL", "COMMANDER", "GENERAL"
+    };
+    return R[rank < 0 ? 0 : (rank > 9 ? 9 : rank)];
+}
+
+void game_add_reward(Game* g, Player* p, int points, int credits, const char* reason) {
+    if (!g || !p) return;
+    if (points < 0) points = 0;
+    if (credits < 0) credits = 0;
+    p->score_points += points;
+    p->career_points += points;
+    p->credits += credits;
+    g->reward_total_points += points;
+    g->reward_total_credits += credits;
+    int nr = game_rank_index(p->career_points);
+    if (nr > p->rank) {
+        p->rank = nr;
+        if (p->id == g->local_player) {
+            char b[96];
+            snprintf(b, sizeof(b), "RANK UP: %s", game_rank_name(nr));
+            game_announce(g, b, col3(1.0f, 0.82f, 0.25f), 3.0f);
+            game_add_killfeed(g, "%s is now %s", p->name, game_rank_name(nr));
+        }
+    }
+    if (p->id == g->local_player && points > 0 && reason && reason[0]) {
+        /* compact feedback, the full ledger is on the results screen */
+        char b[96];
+        snprintf(b, sizeof(b), "+%d PTS  +%d CR  //  %s", points, credits, reason);
+        str_copy(g->pickup_msg, b, sizeof(g->pickup_msg));
+        g->pickup_msg_t = 2.0f;
+    }
+}
+
+/* Match-end payout. The results screen reads the local player's ledger, so
+ * every reward is mirrored into score_points/credits as soon as the match
+ * freezes. Bots still receive their points for the scoreboard. */
+static void grant_match_rewards(Game* g) {
+    if (!g || g->rewards_granted) return;
+    g->rewards_granted = true;
+    int li = g->local_player;
+    if (li < 0 || li >= g->num_players) return;
+    Player* me = &g->players[li];
+    bool win = false;
+    if (g->game_mode == GM_INVASION) {
+        win = g->invasion_victory;
+    } else if (game_mode_team_based(g->game_mode)) {
+        int wt = (g->winner >= 0 && g->winner < g->num_players) ? g->players[g->winner].team : -1;
+        win = (me->team >= 0 && me->team == wt);
+    } else {
+        win = (g->winner == li);
+    }
+    int place = 1;
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (!p->active || p->zombie) continue;
+        if (p->frags > me->frags) place++;
+    }
+    int pts = 0, cr = 0;
+    const char* reason = "DEFEAT";
+    if (win) {
+        pts = 500 + (place == 1 ? 200 : 0);
+        cr = 100 + (place == 1 ? 40 : 0);
+        reason = "VICTORY";
+    } else {
+        pts = (place <= 3) ? 220 : 120;
+        cr = (place <= 3) ? 45 : 20;
+    }
+    if (g->game_mode == GM_INVASION) {
+        int w = g->invasion_wave > 0 ? g->invasion_wave : 1;
+        if (g->invasion_victory) { pts = 600 + w * 120; cr = 220 + w * 35; reason = "INVASION CLEARED"; }
+        else { pts = 100 + w * 60 + g->invasion_killed * 3; cr = 30 + w * 12; reason = "OVERRUN"; }
+    }
+    game_add_reward(g, me, pts, cr, reason);
+    /* Team mates and the winning side get a smaller cut so the board is alive. */
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (!p->active || p->zombie || p == me) continue;
+        int bp = p->team >= 0 && p->team == me->team ? (win ? 80 : 40) : 20;
+        game_add_reward(g, p, bp, 4, NULL);
+    }
 }
 
 static void map_bounds(World* w, Vec3* center, float* extent) {
@@ -159,6 +392,7 @@ void game_set_mode(Game* g, int mode) {
     case GM_CONQUEST: g->score_limit = 250.0f; break;
     case GM_RPG: g->score_limit = (float)(g->frag_limit > 0 ? g->frag_limit : 50); break;
     case GM_BATTLE_ROYALE: g->score_limit = 0.0f; break;
+    case GM_INVASION: g->score_limit = 0.0f; break;
     default: break;
     }
     assign_teams(g);
@@ -173,7 +407,10 @@ void game_set_team(Game* g, int player, int team) {
 
 int game_alive_count(Game* g) {
     int n = 0;
-    for (int i = 0; i < g->num_players; i++) if (g->players[i].active && g->players[i].alive) n++;
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->active && p->alive && !p->zombie) n++;
+    }
     return n;
 }
 
@@ -196,7 +433,19 @@ static void init_player_slot(Game* g, Player* p, int i) {
     p->xp = 0;
     p->xp_next = 100;
     p->dmg_mult = 1.0f;
+    memset(p->upg, 0, sizeof(p->upg));
+    p->credits = 0;
+    p->score_points = 0;
+    p->career_points = 0;
+    p->rank = 0;
+    p->assists = 0;
+    p->last_attacker = -1;
+    p->last_damage_t = -100.0f;
+    p->vamp_flash = 0.0f;
     p->vehicle = -1;
+    p->in_vehicle = false;
+    p->bot_vehicle_target = -1;
+    p->bot_vehicle_t = 0.0f;
     p->team = -1;
     p->color = team_color(i);
     if (i == 0 && !g->demo_mode) str_copy(p->name, "Player", sizeof(p->name));
@@ -276,20 +525,53 @@ void game_select_channel(Game* g, int chan) {
     g->chan_id = chan;
 }
 
-void game_spawn_vehicle(Game* g, int team) {
-    if (!g || g->vehicle_count >= MAX_VEHICLES) return;
-    Vehicle* v = &g->vehicles[g->vehicle_count++];
+int game_spawn_vehicle_type(Game* g, int team, int type) {
+    if (!g || g->vehicle_count >= MAX_VEHICLES) return -1;
+    if (type < 0 || type >= VEH_COUNT) type = g->vehicle_count % VEH_COUNT;
+    const VehicleDef* vd = &vehicle_defs[type];
+    int idx = g->vehicle_count++;
+    Vehicle* v = &g->vehicles[idx];
     memset(v, 0, sizeof(*v));
     v->active = true;
-    v->team = team;
-    v->type = (g->vehicle_count % 2) ? 0 : 1;
+    v->team = (team < 0) ? -1 : (team & 1);
+    v->type = type;
     Vec3 b = g->team_base[team < 0 ? 0 : (team & 1)];
-    v->home = v3(b.x + (team == 0 ? 3.0f : -3.0f), b.y + 0.55f, b.z + (g->vehicle_count % 3 - 1) * 3.0f);
+    /* Put vehicles between the team base and the map centre, then snap them
+     * onto the walkable floor. Fixed +X offsets landed inside base walls on
+     * some maps, which made parked vehicles unreachable for bots. */
+    Vec3 centre; float extent;
+    map_bounds(g->world, &centre, &extent);
+    Vec3 dir = v3(centre.x - b.x, 0, centre.z - b.z);
+    if (v3len(dir) < 0.1f) dir = v3(team == 0 ? 1.0f : -1.0f, 0, 0);
+    dir = v3norm(dir);
+    Vec3 side = v3(-dir.z, 0, dir.x);
+    int rank = idx % VEH_COUNT;
+    float fwd = 4.5f + (float)rank * 2.8f;
+    float lat = ((float)rank - 1.0f) * 3.2f;
+    v->home = v3add(v3add(b, v3mul(dir, fwd)), v3mul(side, lat));
+    v->home.y = b.y + 0.05f;
+    Ray down; down.origin = v3(v->home.x, b.y + 7.0f, v->home.z); down.dir = v3(0, -1, 0);
+    RayHit fh;
+    if (world_raycast(g->world, down, 14.0f, true, &fh) && fh.normal.y > 0.45f)
+        v->home.y = fh.point.y + 0.05f;
+    if (type == 1) v->home.y += 2.35f;
     v->pos = v->home;
-    v->yaw = team == 0 ? 0 : PI;
-    v->hp = 250.0f;
+    v->yaw = (team == 1) ? PI : 0.0f;
+    v->pitch = 0;
+    v->hp = v->max_hp = vd->max_hp;
     v->respawn = 0;
     v->driver = -1;
+    v->killer = -1;
+    for (int k = 0; k < VEH_MODULES; k++) {
+        v->modules[k].max_hp = game_vehicle_module_max_hp(type, k);
+        v->modules[k].hp = v->modules[k].max_hp;
+        v->modules[k].destroyed = false;
+    }
+    return idx;
+}
+
+void game_spawn_vehicle(Game* g, int team) {
+    game_spawn_vehicle_type(g, team, g ? (g->vehicle_count % VEH_COUNT) : 0);
 }
 static Vec3 player_eye(Player* p) { return v3(p->pos.x, p->pos.y + 1.52f - (p->crouch ? 0.45f : 0.0f), p->pos.z); }
 static float player_height(Player* p) { return p->crouch ? 1.15f : 1.72f; }
@@ -347,8 +629,368 @@ void game_init(Game* g, World* w, bool demo, int bot_count) {
     g->br_total = n;
     assign_teams(g);
     game_configure_zones(g, n);
+    game_generate_nature(g);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* procedural nature + ambient population                              */
+/* ------------------------------------------------------------------ */
+static float nature_ground_at(World* w, float x, float z, float from_y, bool* ok) {
+    Ray r;
+    r.origin = v3(x, from_y, z);
+    r.dir = v3(0, -1, 0);
+    RayHit h;
+    if (world_raycast(w, r, 4096.0f, true, &h)) {
+        if (ok) *ok = true;
+        return h.point.y;
+    }
+    if (ok) *ok = false;
+    return from_y;
+}
+
+static bool nature_point_free(Game* g, float x, float z, float min_dist) {
+    float m2 = min_dist * min_dist;
+    for (int i = 0; i < g->tree_count; i++) {
+        float dx = g->trees[i].pos.x - x, dz = g->trees[i].pos.z - z;
+        if (dx * dx + dz * dz < m2) return false;
+    }
+    for (int i = 0; i < g->world->count; i++) {
+        Actor* a = &g->world->actors[i];
+        if (a->type != ACT_PLAYER_START && a->type != ACT_PICKUP && a->type != ACT_JUMPPAD) continue;
+        float dx = a->pos.x - x, dz = a->pos.z - z;
+        if (dx * dx + dz * dz < 4.0f) return false;
+    }
+    return true;
+}
+
+void game_generate_nature(Game* g) {
+    if (!g || !g->world) return;
+    g->tree_count = 0;
+    g->critter_count = 0;
+    g->nature_enabled = true;
+    g->nature_time = 0.0f;
+    Vec3 c;
+    float ext = 48.0f;
+    map_bounds(g->world, &c, &ext);
+    if (ext < 24.0f) ext = 24.0f;
+    float top = c.y + 320.0f;
+
+    /* Trees, bushes and rocks. Three tries per slot keeps the scatter dense
+     * even on maps whose playable floor only covers part of the bounds. */
+    for (int attempt = 0; attempt < MAX_TREES * 4 && g->tree_count < MAX_TREES; attempt++) {
+        float ang = frandr(0.0f, 6.28318f);
+        int band = attempt % 6;
+        float rad = band < 3 ? ext * frandr(0.62f, 1.45f) : ext * frandr(0.04f, 0.62f);
+        float x = c.x + cosf(ang) * rad;
+        float z = c.z + sinf(ang) * rad;
+        bool ok = false;
+        float gy = nature_ground_at(g->world, x, z, top, &ok);
+        if (!ok) continue;
+        if (!nature_point_free(g, x, z, 4.0f)) continue;
+        NatureProp* t = &g->trees[g->tree_count++];
+        memset(t, 0, sizeof(*t));
+        t->pos = v3(x, gy, z);
+        t->active = 1;
+        t->phase = frandr(0.0f, 6.28318f);
+        t->sway = frandr(0.20f, 1.10f);
+        float r = frand();
+        if (r < 0.46f) {
+            t->kind = 0;
+            t->height = frandr(4.4f, 8.8f);
+            t->radius = frandr(1.3f, 2.5f);
+        } else if (r < 0.76f) {
+            t->kind = 1;
+            t->height = frandr(3.6f, 7.2f);
+            t->radius = frandr(1.6f, 3.1f);
+        } else if (r < 0.88f) {
+            t->kind = 2;
+            t->height = frandr(3.0f, 6.5f);
+            t->radius = frandr(0.7f, 1.5f);
+        } else if (r < 0.965f) {
+            t->kind = 3;
+            t->height = frandr(0.7f, 1.8f);
+            t->radius = frandr(0.9f, 2.1f);
+        } else {
+            t->kind = 4;
+            t->height = frandr(0.5f, 1.6f);
+            t->radius = frandr(0.7f, 2.0f);
+        }
+    }
+
+    /* Wildlife: birds circle overhead, ground animals roam near the ring. */
+    static const int KINDS[5] = { 0, 0, 0, 1, 2 };
+    for (int i = 0; i < MAX_CRITTERS; i++) {
+        Critter* cr = &g->critters[i];
+        memset(cr, 0, sizeof(*cr));
+        float ang = frandr(0.0f, 6.28318f);
+        float rad = ext * frandr(0.15f, 0.95f);
+        float x = c.x + cosf(ang) * rad;
+        float z = c.z + sinf(ang) * rad;
+        bool ok = false;
+        float gy = nature_ground_at(g->world, x, z, top, &ok);
+        int kind;
+        float q = frand();
+        if (q < 0.28f) kind = 0;          /* wolf  */
+        else if (q < 0.36f) kind = 1;     /* bear  */
+        else if (q < 0.54f) kind = 2;     /* snake */
+        else if (q < 0.74f) kind = 3;     /* fox   */
+        else kind = 4;                    /* bird  */
+        if (kind != 4 && !ok) continue;
+        if (kind == 4) { gy = c.y + frandr(14.0f, 34.0f); ok = true; }
+        if (!ok) continue;
+        cr->pos = cr->home = v3(x, gy, z);
+        cr->ground = gy;
+        cr->kind = kind;
+        cr->yaw = frandr(0.0f, 6.28318f);
+        cr->speed = kind == 1 ? frandr(1.0f, 2.2f) : frandr(1.6f, 4.6f);
+        cr->timer = frandr(0.5f, 4.0f);
+        cr->phase = frandr(0.0f, 6.28318f);
+        cr->active = 1;
+        g->critter_count++;
+        (void)KINDS;
+    }
+
+    /* GTA-style ambient population. 120 by default, up to 1000 on demand. */
+    game_set_ambient(g, g->ambient_count > 0 ? g->ambient_count : 120);
+}
+
+int game_ambient_active(Game* g) {
+    if (!g) return 0;
+    int n = 0;
+    for (int i = 0; i < g->ambient_count; i++) if (g->ambient[i].active) n++;
+    return n;
+}
+
+int game_set_ambient(Game* g, int count) {
+    if (!g) return 0;
+    if (count < 0) count = 0;
+    if (count > MAX_AMBIENT) count = MAX_AMBIENT;
+    Vec3 c;
+    float ext = 48.0f;
+    map_bounds(g->world, &c, &ext);
+    if (ext < 24.0f) ext = 24.0f;
+    float top = c.y + 320.0f;
+    for (int i = 0; i < g->ambient_count; i++) g->ambient[i].active = 0;
+    g->ambient_count = count;
+    g->ambient_capacity = count;
+    for (int i = 0; i < count; i++) {
+        AmbientNpc* n = &g->ambient[i];
+        memset(n, 0, sizeof(*n));
+        float x = c.x, z = c.z, gy = c.y;
+        bool ok = false;
+        for (int tries = 0; tries < 6 && !ok; tries++) {
+            float ang = frandr(0.0f, 6.28318f);
+            float rad = ext * frandr(0.05f, 0.92f);
+            x = c.x + cosf(ang) * rad;
+            z = c.z + sinf(ang) * rad;
+            gy = nature_ground_at(g->world, x, z, top, &ok);
+        }
+        if (!ok) {
+            /* fall back to a player start so the crowd is never empty */
+            int starts = 0;
+            for (int k = 0; k < g->world->count; k++)
+                if (g->world->actors[k].type == ACT_PLAYER_START) starts++;
+            if (starts > 0) {
+                int pick = (i * 7) % starts;
+                for (int k = 0; k < g->world->count; k++) {
+                    if (g->world->actors[k].type != ACT_PLAYER_START) continue;
+                    if (pick-- == 0) { x = g->world->actors[k].pos.x; z = g->world->actors[k].pos.z; gy = g->world->actors[k].pos.y; break; }
+                }
+            }
+        }
+        n->pos = n->home = v3(x, gy, z);
+        n->yaw = frandr(0.0f, 6.28318f);
+        n->timer = frandr(0.2f, 5.0f);
+        n->phase = frandr(0.0f, 6.28318f);
+        n->palette = (int)(frand() * 6.0f) % 6;
+        n->active = 1;
+    }
+    return count;
+}
+
+static void nature_wander(Vec3* pos, Vec3* home, Vec3* vel, float* yaw, float* timer,
+                          float* phase, float dt, float speed, float radius, bool airborne,
+                          float base_y) {
+    *phase += dt;
+    *timer -= dt;
+    if (*timer <= 0.0f) {
+        *timer = frandr(1.2f, 5.5f);
+        float a = frandr(0.0f, 6.28318f);
+        *yaw = a;
+        float s = speed * frandr(0.45f, 1.0f);
+        *vel = v3(cosf(a) * s, 0, sinf(a) * s);
+    }
+    pos->x += vel->x * dt;
+    pos->z += vel->z * dt;
+    float dx = pos->x - home->x, dz = pos->z - home->z;
+    float d2 = dx * dx + dz * dz;
+    if (d2 > radius * radius) {
+        /* turn back towards home and reflect the heading */
+        float a = atan2f(home->z - pos->z, home->x - pos->x);
+        *yaw = a;
+        vel->x = cosf(a) * speed * 0.7f;
+        vel->z = sinf(a) * speed * 0.7f;
+    }
+    if (airborne) pos->y = base_y + sinf(*phase * 0.9f) * 1.6f;
+    else pos->y = base_y;
+    home->y = base_y;
+}
+
+void game_update_nature(Game* g, float dt) {
+    if (!g || !g->nature_enabled) return;
+    g->nature_time += dt;
+    for (int i = 0; i < g->critter_count; i++) {
+        Critter* cr = &g->critters[i];
+        if (!cr->active) continue;
+        if (cr->kind == 4) {
+            /* birds circle their home point */
+            cr->phase += dt;
+            float a = cr->phase * 0.55f + (float)i;
+            float rad = 8.0f + (float)(i % 5) * 3.0f;
+            cr->pos.x = cr->home.x + cosf(a) * rad;
+            cr->pos.z = cr->home.z + sinf(a) * rad;
+            cr->pos.y = cr->ground + sinf(cr->phase * 0.8f) * 1.8f;
+            cr->yaw = a + 1.5708f;
+        } else {
+            float rad = cr->kind == 1 ? 14.0f : (cr->kind == 2 ? 4.0f : 18.0f);
+            nature_wander(&cr->pos, &cr->home, &cr->vel, &cr->yaw, &cr->timer, &cr->phase,
+                          dt, cr->speed, rad, false, cr->ground);
+        }
+    }
+    for (int i = 0; i < g->ambient_count; i++) {
+        AmbientNpc* n = &g->ambient[i];
+        if (!n->active) continue;
+        nature_wander(&n->pos, &n->home, &n->vel, &n->yaw, &n->timer, &n->phase,
+                      dt, 1.5f, 34.0f, false, n->home.y);
+    }
+}
+
+static void nature_draw_tree(Renderer* r, NatureProp* t, float sway) {
+    float h = t->height, rad = t->radius;
+    float bend = sinf(t->phase + sway) * 0.05f * t->sway;
+    if (t->kind == 4) {
+        Color rock = col(0.37f, 0.36f, 0.34f, 1);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(t->pos.x, t->pos.y + h * 0.34f, t->pos.z),
+                          v3(0, t->phase, 0), v3(rad, h * 0.8f, rad * 0.9f)),
+            rock, 0, 0, 0.7f, false);
+        return;
+    }
+    if (t->kind == 3) {
+        Color leaf = col(0.20f, 0.42f, 0.16f, 1);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(t->pos.x, t->pos.y + h * 0.5f, t->pos.z),
+                          v3(0, t->phase, 0), v3(rad, h, rad)),
+            leaf, 2, 0, 0.6f, false);
+        return;
+    }
+    Color bark = t->kind == 2 ? col(0.28f, 0.24f, 0.20f, 1) : col(0.30f, 0.21f, 0.13f, 1);
+    float trunk_h = h * 0.46f;
+    renderer_draw_model(r, &r->cylinder,
+        mat4_from_trs(v3(t->pos.x, t->pos.y + trunk_h * 0.5f, t->pos.z),
+                      v3(bend * 0.4f, t->phase, bend), v3(rad * 0.16f, trunk_h, rad * 0.16f)),
+        bark, 0, 0, 0.7f, false);
+    if (t->kind == 0) {
+        Color a = col(0.13f, 0.34f, 0.14f, 1);
+        Color b = col(0.18f, 0.44f, 0.18f, 1);
+        renderer_draw_model(r, &r->cone,
+            mat4_from_trs(v3(t->pos.x + bend, t->pos.y + trunk_h + h * 0.20f, t->pos.z),
+                          v3(0, t->phase * 0.7f, 0), v3(rad, h * 0.52f, rad)),
+            a, 2, 0, 0.9f, false);
+        renderer_draw_model(r, &r->cone,
+            mat4_from_trs(v3(t->pos.x + bend * 1.4f, t->pos.y + trunk_h + h * 0.42f, t->pos.z),
+                          v3(0, t->phase, 0), v3(rad * 0.74f, h * 0.42f, rad * 0.74f)),
+            b, 2, 0, 1.0f, false);
+    } else if (t->kind == 1) {
+        Color a = col(0.19f, 0.43f, 0.17f, 1);
+        Color b = col(0.27f, 0.53f, 0.22f, 1);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(t->pos.x + bend, t->pos.y + trunk_h + h * 0.27f, t->pos.z),
+                          v3(0, t->phase, 0), v3(rad * 1.15f, h * 0.42f, rad * 1.15f)),
+            a, 2, 0, 0.9f, false);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(t->pos.x + bend * 1.8f + rad * 0.34f, t->pos.y + trunk_h + h * 0.42f, t->pos.z - rad * 0.20f),
+                          v3(0, t->phase * 0.6f, 0), v3(rad * 0.78f, h * 0.30f, rad * 0.78f)),
+            b, 2, 0, 1.1f, false);
+    } else {
+        /* dead tree: a few bare branches */
+        Color wood = col(0.34f, 0.29f, 0.23f, 1);
+        renderer_draw_model(r, &r->cylinder,
+            mat4_from_trs(v3(t->pos.x + rad * 0.3f, t->pos.y + trunk_h + h * 0.10f, t->pos.z),
+                          v3(0, 0, 0.9f), v3(rad * 0.07f, h * 0.40f, rad * 0.07f)),
+            wood, 0, 0, 0.8f, false);
+        renderer_draw_model(r, &r->cylinder,
+            mat4_from_trs(v3(t->pos.x - rad * 0.3f, t->pos.y + trunk_h + h * 0.16f, t->pos.z),
+                          v3(0.8f, 0, 0), v3(rad * 0.06f, h * 0.34f, rad * 0.06f)),
+            wood, 0, 0, 0.8f, false);
+    }
+}
+
+void game_render_nature(Game* g, Renderer* r) {
+    if (!g || !g->nature_enabled) return;
+    int li = g->local_player;
+    Vec3 eye = (li >= 0 && li < g->num_players) ? g->players[li].pos : r->cam.pos;
+    float sway = sinf(g->nature_time * 0.7f) * 0.6f;
+    float far = 260.0f;
+    for (int i = 0; i < g->tree_count; i++) {
+        NatureProp* t = &g->trees[i];
+        if (!t->active) continue;
+        float dx = t->pos.x - eye.x, dz = t->pos.z - eye.z;
+        if (dx * dx + dz * dz > far * far) continue;
+        nature_draw_tree(r, t, sway);
+    }
+    for (int i = 0; i < g->critter_count; i++) {
+        Critter* cr = &g->critters[i];
+        if (!cr->active) continue;
+        float dx = cr->pos.x - eye.x, dz = cr->pos.z - eye.z;
+        if (dx * dx + dz * dz > 150.0f * 150.0f) continue;
+        Color body;
+        Vec3 sz;
+        switch (cr->kind) {
+        case 0: body = col(0.36f, 0.36f, 0.40f, 1); sz = v3(0.42f, 0.46f, 1.25f); break;
+        case 1: body = col(0.29f, 0.21f, 0.14f, 1); sz = v3(0.95f, 1.05f, 1.85f); break;
+        case 2: body = col(0.36f, 0.46f, 0.20f, 1); sz = v3(0.20f, 0.18f, 1.25f); break;
+        case 3: body = col(0.78f, 0.36f, 0.13f, 1); sz = v3(0.36f, 0.38f, 0.95f); break;
+        default: body = col(0.24f, 0.26f, 0.30f, 1); sz = v3(0.16f, 0.14f, 0.40f); break;
+        }
+        float yaw = cr->yaw;
+        float baseY = cr->pos.y + sz.y * 0.5f;
+        renderer_draw_model(r, &r->cube,
+            mat4_from_trs(v3(cr->pos.x, baseY, cr->pos.z), v3(0, yaw, 0), sz),
+            body, 0, 0, 0.6f, false);
+        if (cr->kind != 4) {
+            Vec3 fwd = v3(cosf(yaw), 0, sinf(yaw));
+            Vec3 head = v3add(v3(cr->pos.x, baseY + sz.y * 0.30f, cr->pos.z), v3mul(fwd, sz.z * 0.48f));
+            renderer_draw_model(r, &r->sphere,
+                mat4_from_trs(head, v3(0, yaw, 0), v3(sz.x * 0.72f, sz.y * 0.62f, sz.z * 0.38f)),
+                body, 0, 0, 0.6f, false);
+        }
+    }
+    /* Ambient crowd. Draw nearest agents only so 1000 citizens stay cheap. */
+    int budget = 240;
+    for (int i = 0; i < g->ambient_count && budget > 0; i++) {
+        AmbientNpc* n = &g->ambient[i];
+        if (!n->active) continue;
+        float dx = n->pos.x - eye.x, dz = n->pos.z - eye.z;
+        if (dx * dx + dz * dz > 95.0f * 95.0f) continue;
+        budget--;
+        static const Color PAL[6] = {
+            {0.55f,0.42f,0.30f,1}, {0.30f,0.42f,0.52f,1}, {0.46f,0.30f,0.32f,1},
+            {0.32f,0.46f,0.34f,1}, {0.52f,0.48f,0.28f,1}, {0.38f,0.34f,0.46f,1}
+        };
+        Color c = PAL[n->palette % 6];
+        float bob = sinf(n->phase * 3.1f) * 0.04f;
+        renderer_draw_model(r, &r->cube,
+            mat4_from_trs(v3(n->pos.x, n->pos.y + 0.92f + bob, n->pos.z), v3(0, n->yaw, 0),
+                          v3(0.44f, 1.05f, 0.30f)),
+            c, 0, 0, 0.7f, false);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(n->pos.x, n->pos.y + 1.66f + bob, n->pos.z), v3(0, n->yaw, 0),
+                          v3(0.34f, 0.38f, 0.34f)),
+            col(0.72f, 0.58f, 0.46f, 1), 0, 0, 0.6f, false);
+    }
+}
 void game_shutdown(Game* g) { memset(g, 0, sizeof(*g)); }
 
 static int pick_spawn(Game* g, Player* p) {
@@ -392,7 +1034,7 @@ void game_respawn(Game* g, Player* p) {
     }
     p->vel = v3(0, 0, 0);
     p->pitch = 0;
-    p->health = player_max_health(p);
+    p->health = game_player_max_health(p);
     p->armor = 0;
     p->alive = true;
     p->in_vehicle = false;
@@ -412,6 +1054,7 @@ void game_respawn(Game* g, Player* p) {
     p->render_yaw = p->yaw;
     p->render_pitch = p->pitch;
     p->bot_path_len = 0; p->bot_path_idx = 0; p->bot_target = -1; p->bot_repath = 0;
+    p->bot_vehicle_target = -1; p->bot_vehicle_t = frandr(0.2f, 1.2f);
     p->use_latch = false;
     if (g->local_player == p->id) g->damage_flash = 0;
     if (g->local_player == p->id) audio_play(SFX_RESPAWN, 0.7f, 0);
@@ -493,10 +1136,15 @@ static void setup_objectives(Game* g) {
         }
     }
     if (g->game_mode == GM_VCTF) {
-        game_spawn_vehicle(g, 0);
-        game_spawn_vehicle(g, 0);
-        game_spawn_vehicle(g, 1);
-        game_spawn_vehicle(g, 1);
+        /* all three classes per team: fast Scorpion, air Manta, heavy Goliath */
+        for (int t = 0; t < 2; t++)
+            for (int k = 0; k < VEH_COUNT; k++) game_spawn_vehicle_type(g, t, k);
+    } else if (g->game_mode == GM_ONSLAUGHT || g->game_mode == GM_CONQUEST) {
+        /* Battlefield-style modes get a light motor pool as well. */
+        for (int t = 0; t < 2; t++) {
+            game_spawn_vehicle_type(g, t, 0);
+            game_spawn_vehicle_type(g, t, 1);
+        }
     }
     if (g->game_mode == GM_BATTLE_ROYALE) {
         Vec3 c; float e;
@@ -515,6 +1163,40 @@ static void setup_objectives(Game* g) {
 }
 
 void game_reset(Game* g) {
+    /* Leaving Invasion (or restarting it) must remove every zombie slot before
+     * the normal player team/spawn setup runs. Survivor slots are always the
+     * compact prefix, zombies are appended after them. */
+    int survivors = 0;
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->active && !p->zombie) survivors++;
+    }
+    if (g->game_mode != GM_INVASION || survivors > 0) {
+        for (int i = 0; i < g->num_players; i++) {
+            Player* p = &g->players[i];
+            if (p->zombie) { p->active = false; p->alive = false; p->zombie = false; }
+        }
+        if (survivors > 0 && survivors < g->num_players) g->num_players = survivors;
+        g->invasion_survivors = survivors;
+    }
+    if (g->game_mode == GM_INVASION) {
+        if (g->invasion_survivors < 1 || g->invasion_survivors > g->num_players)
+            g->invasion_survivors = g->num_players;
+        g->invasion_wave = 0;
+        g->invasion_wave_max = 12;
+        g->invasion_spawn_left = 0;
+        g->invasion_alive = 0;
+        g->invasion_killed = 0;
+        g->invasion_score = 0;
+        g->invasion_wave_timer = 4.0f;
+        g->invasion_spawn_timer = 0.0f;
+        g->invasion_victory = false;
+    }
+    g->match_over = false;
+    g->match_over_t = 0.0f;
+    g->rewards_granted = false;
+    g->reward_total_points = 0;
+    g->reward_total_credits = 0;
     memset(g->projs, 0, sizeof(g->projs));
     memset(g->particles, 0, sizeof(g->particles));
     memset(g->beams, 0, sizeof(g->beams));
@@ -558,6 +1240,12 @@ void game_reset(Game* g) {
         game_respawn(g, p);
     }
     g->br_alive = game_alive_count(g);
+    if (g->game_mode == GM_INVASION) {
+        g->time_limit = 1e9f;
+        g->frag_limit = 1000000;
+        g->score_limit = 0.0f;
+        game_announce(g, "ZOMBIE INVASION - HOLD THE LINE", col3(0.55f, 0.95f, 0.35f), 3.0f);
+    }
     g->start_countdown = 1.6f;
     g->started = true;
     game_build_nav(g);
@@ -636,9 +1324,105 @@ void game_explosion(Game* g, Vec3 pos, float radius, float damage, int attacker,
             p->vel = v3add(p->vel, v3mul(dir, 6.0f * f));
             p->vel.y += 4.0f * f;
         }
+        for (int i = 0; i < g->vehicle_count; i++) {
+            Vehicle* v = &g->vehicles[i];
+            if (!v->active) continue;
+            Vec3 c = v3(v->pos.x, v->pos.y + 0.7f, v->pos.z);
+            float d = v3len(v3sub(c, pos));
+            if (d > radius) continue;
+            float f = 1.0f - d / radius;
+            game_damage_vehicle(g, i, damage * (0.45f + 0.55f * f), attacker, pos);
+        }
     }
     audio_play_at(SFX_EXPLODE, 1.0f, pos.x, pos.y, pos.z, g->players[g->local_player].pos.x, g->players[g->local_player].pos.y, g->players[g->local_player].pos.z,
                   sinf(g->players[g->local_player].yaw), -cosf(g->players[g->local_player].yaw));
+}
+
+void game_damage_vehicle(Game* g, int vi, float dmg, int attacker, Vec3 point) {
+    game_damage_vehicle_part(g, vi, dmg, attacker, point, -1);
+}
+
+void game_damage_vehicle_part(Game* g, int vi, float dmg, int attacker, Vec3 point, int part) {
+    if (!g || vi < 0 || vi >= g->vehicle_count || dmg <= 0.0f) return;
+    /* Clients predict weapons locally, but the host owns vehicle HP and
+     * destruction. Ignoring client-side vehicle damage prevents ghost
+     * explosions; the next vehicle packet restores the authoritative state. */
+    if (g->networked && !g->server_mode) return;
+    Vehicle* v = &g->vehicles[vi];
+    if (!v->active) return;
+    if (attacker >= 0 && attacker < g->num_players && attacker != v->driver &&
+        game_mode_team_based(g->game_mode) && g->players[attacker].team == v->team) return;
+
+    /* Modular damage: a hit on a wheel/engine/weapon puts 55% into that
+     * module and 45% into the hull. Destroying a module changes handling or
+     * firepower without instantly killing the vehicle. */
+    float hull_dmg = dmg;
+    if (part >= 0 && part < VEH_MODULES) {
+        VehicleModule* m = &v->modules[part];
+        if (!m->destroyed && m->max_hp > 0.0f) {
+            m->hp -= dmg * 0.55f;
+            hull_dmg = dmg * 0.45f;
+            if (m->hp <= 0.0f) {
+                m->hp = 0.0f;
+                m->destroyed = true;
+                Player* lp2 = (g->local_player >= 0 && g->local_player < g->num_players)
+                              ? &g->players[g->local_player] : NULL;
+                if (lp2 && v3len(v3sub(v->pos, lp2->pos)) < 80.0f) {
+                    for (int k = 0; k < 12; k++) {
+                        Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.1f, 1), frandr(-1, 1)));
+                        game_add_particle(g, point, v3mul(d, frandr(2.0f, 6.0f)),
+                                          col3(1.0f, 0.62f, 0.2f), frandr(0.08f, 0.22f),
+                                          frandr(0.25f, 0.6f), true, 5.0f, 1.2f);
+                    }
+                }
+                if (lp2) {
+                    if (v->driver == lp2->id)
+                        game_pickup_msg(g, "YOUR %s IS DESTROYED", game_vehicle_module_name(part));
+                    else if (attacker == lp2->id)
+                        game_pickup_msg(g, "ENEMY %s DESTROYED", game_vehicle_module_name(part));
+                }
+            }
+        }
+    }
+    v->hp -= hull_dmg;
+    v->hit_flash = fminf(1.0f, v->hit_flash + 0.35f + dmg * 0.015f);
+    v->killer = attacker;
+    /* cheap hit sparks, only near the local player */
+    Player* lp = (g->local_player >= 0 && g->local_player < g->num_players) ? &g->players[g->local_player] : NULL;
+    if (lp && v3len(v3sub(v->pos, lp->pos)) < 70.0f) {
+        int n = vi % 3 + 3;
+        for (int k = 0; k < n; k++) {
+            Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.3f, 1), frandr(-1, 1)));
+            game_add_particle(g, point, v3mul(d, frandr(2, 5)), col3(1.0f, 0.75f, 0.3f), frandr(0.06f, 0.16f), frandr(0.15f, 0.35f), true, 4.0f, 1.0f);
+        }
+    }
+    if (v->hp > 0.0f) return;
+
+    /* destroyed: eject driver, explode, then respawn at home after a delay */
+    v->hp = 0.0f;
+    int driver = v->driver;
+    int type = v->type;
+    int team = v->team;
+    Vec3 pos = v3(v->pos.x, v->pos.y + 0.9f, v->pos.z);
+    if (driver >= 0 && driver < g->num_players) {
+        g->players[driver].in_vehicle = false;
+        g->players[driver].vehicle = -1;
+        g->players[driver].use_latch = true; /* do not instantly re-enter */
+    }
+    v->driver = -1;
+    v->active = false;
+    v->respawn = 12.0f;
+    v->hit_flash = 0.0f;
+    v->smoke = 0.0f;
+    game_explosion(g, pos, 7.0f, 85.0f, attacker, team_base_color(team < 0 ? 0 : team));
+    if (attacker >= 0 && attacker < g->num_players && attacker != driver) {
+        game_add_killfeed(g, "%s destroyed %s's %s", g->players[attacker].name,
+                          (driver >= 0 && driver < g->num_players) ? g->players[driver].name : "enemy",
+                          game_vehicle_name(type));
+    } else {
+        game_add_killfeed(g, "%s was destroyed", game_vehicle_name(type));
+    }
+    if (lp && v3len(v3sub(pos, lp->pos)) < 90.0f) audio_play(SFX_EXPLODE, 0.8f, 0.0f);
 }
 
 void game_add_killfeed(Game* g, const char* fmt, ...) {
@@ -671,16 +1455,36 @@ void game_pickup_msg(Game* g, const char* fmt, ...) {
 /* damage / scoring                                                    */
 /* ------------------------------------------------------------------ */
 void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec3 point, int weapon) {
-    (void)point;
     (void)weapon;
     if (!victim->active || !victim->alive) return;
     if (victim->protection > 0 && attacker != victim->id) return;
+    if (g->game_mode == GM_INVASION && attacker >= 0 && attacker < g->num_players && attacker != victim->id) {
+        Player* atk = &g->players[attacker];
+        /* survivors never friendly-fire each other; zombies never eat zombies */
+        if (atk->zombie == victim->zombie) return;
+    }
     if (attacker == victim->id) dmg *= 0.6f;
     if (attacker >= 0 && attacker < g->num_players && attacker != victim->id) {
         Player* atk = &g->players[attacker];
         if (game_mode_team_based(g->game_mode) && atk->team >= 0 && atk->team == victim->team) return;
         dmg *= (atk->dmg_mult > 0.01f ? atk->dmg_mult : 1.0f);
     }
+    /* Occupied vehicles soak most of the damage. The driver still takes a
+     * small share, and the vehicle explodes when its HP reaches zero. */
+    if (victim->in_vehicle && victim->vehicle >= 0 && victim->vehicle < g->vehicle_count) {
+        Vehicle* veh = &g->vehicles[victim->vehicle];
+        if (veh->active && veh->driver == victim->id) {
+            game_damage_vehicle(g, victim->vehicle, dmg * 0.82f, attacker, point);
+            if (!victim->alive) return;
+            if (!victim->in_vehicle) return; /* destroyed -> explosion handles it */
+            dmg *= 0.18f;
+        }
+    }
+
+    /* Armor Plating upgrade: flat damage reduction, capped at 30%. */
+    float reduc = 0.035f * (float)victim->upg[UPG_ARMOR];
+    if (reduc > 0.30f) reduc = 0.30f;
+    dmg *= 1.0f - reduc;
 
     float armor_absorb = victim->armor > 0 ? 0.55f : 0.0f;
     float to_armor = dmg * armor_absorb;
@@ -698,6 +1502,16 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
             audio_play_at(SFX_HIT, 0.8f, victim->pos.x, victim->pos.y + 1.2f, victim->pos.z, lx, ly, lz, sinf(a->yaw), -cosf(a->yaw));
         }
     }
+    if (attacker >= 0 && attacker < g->num_players && attacker != victim->id) {
+        victim->last_attacker = attacker;
+        victim->last_damage_t = g->time;
+        Player* vp = &g->players[attacker];
+        if (!vp->zombie && vp->upg[UPG_VAMP] > 0 && vp->alive) {
+            float heal = fminf(14.0f, dmg * 0.02f * (float)vp->upg[UPG_VAMP]);
+            vp->health = fminf(game_player_max_health(vp), vp->health + heal);
+            vp->vamp_flash = fminf(1.0f, vp->vamp_flash + heal * 0.12f);
+        }
+    }
     if (g->local_player == victim->id) { g->damage_flash = 1.0f; g->damage_dir = dir; g->shake = fminf(g->shake + dmg * 0.02f, 1.4f); }
     if (g->local_player == attacker) g->hitmarker = 0.28f;
 
@@ -707,7 +1521,8 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
         victim->deaths++;
         victim->spree = 0;
         victim->death_time = 0;
-        victim->respawn_timer = (g->game_mode == GM_BATTLE_ROYALE) ? 1e9f : 2.4f;
+        victim->respawn_timer = victim->zombie ? 1.15f :
+                                ((g->game_mode == GM_BATTLE_ROYALE) ? 1e9f : 2.4f);
         victim->vel = v3(0, 0, 0);
         if (victim->in_vehicle) {
             int vi = victim->vehicle;
@@ -728,19 +1543,38 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
             fprintf(stderr, "[kill] victim=%s killer=%d weapon=%d pos=%.1f,%.1f,%.1f\n",
                     victim->name, attacker, weapon, victim->pos.x, victim->pos.y, victim->pos.z);
         }
-        if (attacker >= 0 && attacker < g->num_players && attacker != victim->id) {
+        if (attacker >= 0 && attacker < g->num_players && attacker != victim->id &&
+            !g->players[attacker].zombie) {
             Player* a = &g->players[attacker];
             a->frags++;
             a->spree++;
-            if (g->game_mode == GM_RPG) {
+            if (g->game_mode == GM_INVASION && victim->zombie) {
+                a->xp += 20 + victim->zombie_type * 20;
+                g->invasion_killed++;
+                g->invasion_score += 10 + victim->zombie_type * 10;
+                game_add_reward(g, a, 25 + victim->zombie_type * 20, 8 + victim->zombie_type * 4, "ZOMBIE KILL");
+            } else if (!victim->zombie) {
+                game_add_reward(g, a, 100 + victim->level * 10, 20, "KILL");
+            }
+            /* assist for the last other player who damaged the victim */
+            if (victim->last_attacker >= 0 && victim->last_attacker < g->num_players &&
+                victim->last_attacker != attacker && victim->last_attacker != victim->id &&
+                g->time - victim->last_damage_t < 8.0f) {
+                Player* as = &g->players[victim->last_attacker];
+                if (as->active && !as->zombie) {
+                    as->assists++;
+                    game_add_reward(g, as, 40, 8, "ASSIST");
+                }
+            }
+            if (g->game_mode == GM_RPG || (g->game_mode == GM_INVASION && victim->zombie)) {
                 a->xp += 100 + victim->level * 25;
                 bool leveled = false;
                 while (a->xp >= a->xp_next && a->level < 60) {
                     a->xp -= a->xp_next;
                     a->level++;
                     a->xp_next = 100 + a->level * 60;
-                    a->dmg_mult = 1.0f + 0.08f * (float)(a->level - 1);
-                    a->health = player_max_health(a);
+                    game_player_refresh_stats(a);
+                    a->health = game_player_max_health(a);
                     leveled = true;
                 }
                 if (leveled) {
@@ -758,8 +1592,8 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
                         finish_match_team(g, a->team, "frag limit");
                 }
             }
-            a->health = fminf(player_max_health(a), a->health + 12.0f);
-            a->armor = fminf(100.0f, a->armor + 8.0f);
+            a->health = fminf(game_player_max_health(a), a->health + 12.0f);
+            a->armor = fminf(game_player_max_armor(a), a->armor + 8.0f);
             if (a->id == g->local_player) {
                 g->local_kills_this_life++;
                 g->multikill_t = 3.0f;
@@ -774,7 +1608,10 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
             if (a->spree == 15) game_announce(g, "UNSTOPPABLE!", col3(1, 0.2f, 0.5f), 2.6f);
             if (a->spree == 20) game_announce(g, "GODLIKE!", col3(0.8f, 0.3f, 1), 2.8f);
             if (a->id == g->local_player && victim->id != a->id) audio_play(SFX_HEADSHOT, 0.4f, 0);
-            game_add_killfeed(g, "%s  >>  %s", a->name, victim->name);
+            if (!victim->zombie || victim->zombie_type >= 2)
+                game_add_killfeed(g, "%s  >>  %s", a->name, victim->name);
+        } else if (attacker >= 0 && attacker < g->num_players && g->players[attacker].zombie) {
+            game_add_killfeed(g, "%s  >>  %s", g->players[attacker].name, victim->name);
         } else {
             game_add_killfeed(g, "%s died", victim->name);
         }
@@ -786,6 +1623,7 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
             g->local_player = (g->local_player + 1) % g->num_players;
         }
         for (int i = g->num_players - 1; i >= 0; i--) {
+            if (g->game_mode == GM_INVASION) break;
             if (g->players[i].frags >= g->frag_limit) { g->match_over = true; g->winner = i; }
         }
     }
@@ -810,6 +1648,53 @@ static bool trace_players(Game* g, Vec3 a, Vec3 b, int ignore, int* hit_player, 
         if (t >= 0 && t < best) { best = t; bestp = i; }
     }
     if (bestp >= 0) { if (hit_player) *hit_player = bestp; if (hit_point) *hit_point = v3add(a, v3mul(dir, best)); return true; }
+    return false;
+}
+
+/* Which module did a shot hit? Corners are wheels/thrusters, the rear is the
+ * engine, the front/top is the weapon. This is intentionally cheap: one dot
+ * product per axis, no per-part collision meshes. */
+static int veh_module_from_hit(Vehicle* v, Vec3 hit) {
+    Vec3 f = v3(sinf(v->yaw), 0, -cosf(v->yaw));
+    Vec3 r = v3(cosf(v->yaw), 0, sinf(v->yaw));
+    Vec3 rel = v3sub(hit, v->pos);
+    float lf = v3dot(rel, f);
+    float ls = v3dot(rel, r);
+    float lu = rel.y;
+    if (v->type == 1) {
+        if (fabsf(ls) > 0.75f) return (lf >= 0.0f ? 0 : 2) + (ls >= 0.0f ? 1 : 0);
+        if (lf < -0.40f) return VEH_ENGINE;
+        return VEH_WEAPON;
+    }
+    float half_w = (v->type == 2) ? 1.30f : 0.95f;
+    if (fabsf(ls) > half_w && lu < 0.95f)
+        return (lf >= 0.0f ? 0 : 2) + (ls >= 0.0f ? 1 : 0);
+    if (lu > (v->type == 2 ? 0.95f : 0.68f) && lf > -0.35f) return VEH_WEAPON;
+    return VEH_ENGINE;
+}
+
+static bool trace_vehicles(Game* g, Vec3 a, Vec3 b, int ignore_player, int* hit_vehicle, Vec3* hit_point, int* hit_module) {
+    float seglen = v3len(v3sub(b, a));
+    if (seglen < 1e-4f) return false;
+    Vec3 dir = v3mul(v3sub(b, a), 1.0f / seglen);
+    float best = seglen;
+    int bestv = -1;
+    for (int i = 0; i < g->vehicle_count; i++) {
+        Vehicle* v = &g->vehicles[i];
+        if (!v->active) continue;
+        if (ignore_player >= 0 && v->driver == ignore_player) continue;
+        const VehicleDef* vd = &vehicle_defs[v->type];
+        Vec3 c = v3(v->pos.x, v->pos.y + (v->type == 1 ? 0.55f : 0.75f), v->pos.z);
+        float t = ray_sphere(a, dir, c, vd->hit_radius);
+        if (t >= 0.0f && t < best) { best = t; bestv = i; }
+    }
+    if (bestv >= 0) {
+        Vec3 hp = v3add(a, v3mul(dir, best));
+        if (hit_vehicle) *hit_vehicle = bestv;
+        if (hit_point) *hit_point = hp;
+        if (hit_module) *hit_module = veh_module_from_hit(&g->vehicles[bestv], hp);
+        return true;
+    }
     return false;
 }
 
@@ -849,8 +1734,24 @@ static void fire_hitscan(Game* g, Player* p, float damage, float spread, Color c
             game_add_killfeed(g, "%s triggered a shock combo", p->name);
         }
     }
-    int hp = -1; Vec3 hpt;
-    if (!combo && trace_players(g, eye, end, p->id, &hp, &hpt)) {
+    int hp = -1; Vec3 hpt; bool hitp = false;
+    if (!combo) hitp = trace_players(g, eye, end, p->id, &hp, &hpt);
+    int hv = -1, hmod = -1; Vec3 hvt; bool hitv = false;
+    if (!combo) {
+        Vec3 limit = hitp ? hpt : end;
+        hitv = trace_vehicles(g, eye, limit, p->id, &hv, &hvt, &hmod);
+    }
+    if (hitv) {
+        end = hvt; wd = v3len(v3sub(hvt, eye));
+        game_damage_vehicle_part(g, hv, damage, p->id, hvt, hmod);
+        for (int i = 0; i < 7; i++) {
+            Vec3 d = v3norm(v3add(dir, v3(frandr(-0.6f, 0.6f), frandr(-0.6f, 0.6f), frandr(-0.6f, 0.6f))));
+            Vec3 hvpos = g->vehicles[hv].pos;
+            game_add_particle(g, hvt, v3mul(d, frandr(1.5f, 4.5f)), team_base_color(g->vehicles[hv].team < 0 ? 0 : g->vehicles[hv].team), frandr(0.12f, 0.3f), frandr(0.25f, 0.5f), true, 2.0f, 1.2f);
+            (void)hvpos;
+        }
+        if (p->id == g->local_player) audio_play(SFX_HIT, 0.5f, 0);
+    } else if (hitp) {
         end = hpt; wd = v3len(v3sub(hpt, eye));
         Player* v = &g->players[hp];
         game_damage(g, v, damage, p->id, dir, hpt, weapon);
@@ -870,8 +1771,49 @@ static void fire_hitscan(Game* g, Player* p, float damage, float spread, Color c
     game_beam_fx(g, v3add(eye, v3mul(dir, 0.4f)), end, color, beam_width, 0.09f);
 }
 
+static void vehicle_fire(Game* g, Player* p, bool alt) {
+    int vi = p->vehicle;
+    if (vi < 0 || vi >= g->vehicle_count) return;
+    Vehicle* v = &g->vehicles[vi];
+    if (!v->active || v->driver != p->id) return;
+    if (v->modules[VEH_WEAPON].destroyed) return;
+    const VehicleDef* vd = &vehicle_defs[v->type];
+    if (v->fire_timer > 0.0f) return;
+    v->fire_timer = vd->fire_delay * (alt ? 1.55f : 1.0f);
+
+    Vec3 dir; dir_from_angles(p->yaw, p->pitch, &dir);
+    Vec3 right = v3(cosf(p->yaw), 0, sinf(p->yaw));
+    float gun_h = v->type == 1 ? 0.05f : (v->type == 2 ? 1.05f : 0.72f);
+    Vec3 muzzle = v3add(v3add(v->pos, v3(0, gun_h, 0)), v3mul(dir, v->type == 2 ? 1.9f : 1.35f));
+    if (v->type == 0) muzzle = v3add(muzzle, v3mul(right, (alt ? -0.55f : 0.55f)));
+
+    Projectile* pr = NULL;
+    for (int i = 0; i < MAX_PROJECTILES; i++) if (!g->projs[i].active) { pr = &g->projs[i]; break; }
+    if (!pr) return;
+    memset(pr, 0, sizeof(*pr));
+    pr->active = true;
+    pr->type = v->type == 2 ? WPN_ROCKET : WPN_SHOCK;
+    pr->owner = p->id;
+    pr->pos = muzzle;
+    pr->vel = v3mul(dir, vd->proj_speed * (alt ? 1.15f : 1.0f));
+    pr->life = 5.0f;
+    pr->damage = vd->damage * (alt ? 1.45f : 1.0f);
+    pr->splash = vd->splash * (alt ? 1.35f : 1.0f);
+    pr->radius = vd->splash > 0.1f ? (v->type == 2 ? 5.0f : 4.0f) : 0.0f;
+    pr->gravity = vd->gravity;
+    pr->color = v->type == 2 ? col3(1.0f, 0.5f, 0.15f) : col3(0.35f, 0.8f, 1.0f);
+    p->muzzle_flash = 0.10f;
+    p->recoil = fminf(p->recoil + 0.35f, 1.2f);
+    p->view_kick += v->type == 2 ? 0.10f : 0.03f;
+    if (p->id == g->local_player) {
+        audio_play(v->type == 2 ? SFX_ROCKET : SFX_SHOCK, 0.55f, 0.0f);
+        if (g->shake < 0.25f) g->shake = v->type == 2 ? 0.32f : 0.12f;
+    }
+}
+
 void game_fire(Game* g, Player* p, bool alt) {
     if (!p->alive || p->protection > 1.7f) return;
+    if (p->in_vehicle) { vehicle_fire(g, p, alt); return; }
     int wi = p->weapon;
     if (wi < 0 || wi >= WPN_COUNT) return;
     WeaponDef* wd = &weapon_defs[wi];
@@ -882,7 +1824,9 @@ void game_fire(Game* g, Player* p, bool alt) {
         return;
     }
     float delay = alt ? wd->alt_delay : wd->fire_delay;
-    p->fire_timer = delay;
+    float rate = game_player_fire_mult(p);
+    if (rate < 0.25f) rate = 0.25f;
+    p->fire_timer = delay * rate;
     p->ammo[wi] -= 1;
     p->muzzle_flash = 0.09f;
     p->recoil = fminf(p->recoil + 0.6f, 1.5f);
@@ -964,7 +1908,7 @@ void game_fire(Game* g, Player* p, bool alt) {
 static void give_weapon(Game* g, Player* p, int type, int wi) {
     (void)type;
     p->has[wi] = true;
-    p->ammo[wi] = weapon_defs[wi].ammo_max;
+    p->ammo[wi] = game_player_ammo_max(p, wi);
     p->weapon = wi;
     if (p->id == g->local_player) {
         game_pickup_msg(g, "Picked up %s", weapon_defs[wi].name);
@@ -975,13 +1919,13 @@ static void give_weapon(Game* g, Player* p, int type, int wi) {
 static void apply_pickup(Game* g, Player* p, Actor* a) {
     int sub = a->subtype;
     switch (sub) {
-    case PICK_HEALTH_SMALL: p->health = fminf(player_max_health(p), p->health + 10.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+10 Health"); audio_play(SFX_PICKUP_HEALTH, 0.6f, 0); } break;
-    case PICK_HEALTH_BIG: p->health = fminf(player_max_health(p), p->health + 25.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+25 Health"); audio_play(SFX_PICKUP_HEALTH, 0.8f, 0); } break;
-    case PICK_ARMOR_SMALL: p->armor = fminf(100.0f, p->armor + 25.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+25 Shield"); audio_play(SFX_PICKUP_ARMOR, 0.6f, 0); } break;
-    case PICK_ARMOR_BIG: p->armor = fminf(100.0f, p->armor + 50.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+50 Shield"); audio_play(SFX_PICKUP_ARMOR, 0.8f, 0); } break;
+    case PICK_HEALTH_SMALL: p->health = fminf(game_player_max_health(p), p->health + 10.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+10 Health"); audio_play(SFX_PICKUP_HEALTH, 0.6f, 0); } break;
+    case PICK_HEALTH_BIG: p->health = fminf(game_player_max_health(p), p->health + 25.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+25 Health"); audio_play(SFX_PICKUP_HEALTH, 0.8f, 0); } break;
+    case PICK_ARMOR_SMALL: p->armor = fminf(game_player_max_armor(p), p->armor + 25.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+25 Shield"); audio_play(SFX_PICKUP_ARMOR, 0.6f, 0); } break;
+    case PICK_ARMOR_BIG: p->armor = fminf(game_player_max_armor(p), p->armor + 50.0f); if (p->id == g->local_player) { game_pickup_msg(g, "+50 Shield"); audio_play(SFX_PICKUP_ARMOR, 0.8f, 0); } break;
     case PICK_AMMO: {
         int wi = p->weapon;
-        p->ammo[wi] = (int)fminf((float)weapon_defs[wi].ammo_max, p->ammo[wi] + 20.0f);
+        p->ammo[wi] = (int)fminf((float)game_player_ammo_max(p, wi), p->ammo[wi] + 20.0f);
         if (p->id == g->local_player) { game_pickup_msg(g, "+20 %s Ammo", weapon_defs[wi].short_name); audio_play(SFX_PICKUP_AMMO, 0.6f, 0); }
         break;
     }
@@ -1062,12 +2006,20 @@ static void update_projectiles(Game* g, float dt) {
             else pr->pos = v3add(prev, step);
         } else pr->pos = v3add(prev, step);
 
-        int hp = -1; Vec3 hpt;
-        if (!boom && trace_players(g, prev, pr->pos, pr->owner, &hp, &hpt)) { pr->pos = hpt; boom = true; }
+        int hp = -1; Vec3 hpt; bool hitp = false;
+        if (!boom) hitp = trace_players(g, prev, pr->pos, pr->owner, &hp, &hpt);
+        int hv = -1, hmod = -1; Vec3 hvt; bool hitv = false;
+        if (!boom) {
+            Vec3 limit = hitp ? hpt : pr->pos;
+            hitv = trace_vehicles(g, prev, limit, pr->owner, &hv, &hvt, &hmod);
+        }
+        if (hitv) { pr->pos = hvt; boom = true; hp = -1; }
+        else if (hitp) { pr->pos = hpt; boom = true; }
         if (boom) {
             if (pr->splash > 0) game_explosion(g, pr->pos, pr->radius, pr->damage, pr->owner, pr->color);
             else {
                 if (hp >= 0) game_damage(g, &g->players[hp], pr->damage, pr->owner, v3norm(pr->vel), pr->pos, pr->type);
+                if (hv >= 0) game_damage_vehicle_part(g, hv, pr->damage, pr->owner, pr->pos, hmod);
                 for (int k = 0; k < 8; k++) {
                     Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.4f, 1), frandr(-1, 1)));
                     game_add_particle(g, pr->pos, v3mul(d, frandr(1, 4)), pr->color, frandr(0.08f, 0.2f), frandr(0.2f, 0.5f), true, 4, 1.5f);
@@ -1124,8 +2076,15 @@ static void update_effects(Game* g, float dt) {
 /* ------------------------------------------------------------------ */
 static void update_player_movement(Game* g, Player* p, float dt) {
     if (!p->alive) {
-        p->respawn_timer -= dt;
         p->death_time += dt;
+        if (p->zombie) {
+            /* Zombies dissolve and free their slot; only the wave director
+             * ever brings them back. */
+            p->respawn_timer -= dt;
+            if (p->respawn_timer <= 0.0f) { p->active = false; p->alive = false; }
+            return;
+        }
+        p->respawn_timer -= dt;
         if (p->respawn_timer <= 0) game_respawn(g, p);
         return;
     }
@@ -1138,6 +2097,7 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (p->shake > 0) p->shake = fmaxf(0, p->shake - dt * 2.4f);
     if (p->damage_flash > 0) p->damage_flash = fmaxf(0, p->damage_flash - dt * 3.0f);
     if (p->land_kick > 0) p->land_kick = fmaxf(0, p->land_kick - dt * 5.0f);
+    if (p->vamp_flash > 0) p->vamp_flash = fmaxf(0, p->vamp_flash - dt * 2.5f);
     if (p->dodge_cooldown > 0) p->dodge_cooldown -= dt;
 
     float yaw = p->yaw;
@@ -1148,7 +2108,13 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (wl > 1.0f) wish = v3mul(wish, 1.0f / wl);
     wl = fminf(wl, 1.0f);
 
-    bool want_jump = p->input.jump;
+    int veh_type = -1;
+    if (p->in_vehicle && p->vehicle >= 0 && p->vehicle < g->vehicle_count) {
+        Vehicle* v = &g->vehicles[p->vehicle];
+        if (v->active) veh_type = v->type;
+    }
+
+    bool want_jump = p->input.jump && veh_type < 0;
     if (want_jump && !p->jump_latch) {
         if (p->grounded) {
             p->vel.y = 8.6f;
@@ -1168,7 +2134,7 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     p->jump_latch = want_jump;
 
     /* dodge */
-    if (p->input.dodge && p->grounded && p->dodge_cooldown <= 0 && wl > 0.1f) {
+    if (veh_type < 0 && p->input.dodge && p->grounded && p->dodge_cooldown <= 0 && wl > 0.1f) {
         p->vel = v3add(p->vel, v3mul(wish, 15.0f));
         p->vel.y = 3.2f;
         p->grounded = false;
@@ -1183,13 +2149,39 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (p->dodge_timer > 0) p->dodge_timer -= dt;
 
     /* crouch */
-    p->crouch = p->input.crouch;
+    p->crouch = p->input.crouch && veh_type < 0;
 
     bool was_grounded = p->grounded;
     float accel = p->grounded ? 62.0f : 14.0f;
     float max_speed = p->grounded ? (p->crouch ? 3.0f : 9.6f) : 10.5f;
-    if (p->in_vehicle) { accel *= 2.4f; max_speed *= 2.7f; }
+    if (veh_type >= 0) {
+        const VehicleDef* vd = &vehicle_defs[veh_type];
+        accel = vd->accel;
+        max_speed = vd->max_speed;
+        Vehicle* vv = &g->vehicles[p->vehicle];
+        int lost_l = 0, lost_r = 0;
+        for (int w = 0; w < VEH_WHEELS; w++) {
+            if (!vv->modules[w].destroyed) continue;
+            if ((w & 1) == 0) lost_l++; else lost_r++;
+        }
+        float health_mod = 1.0f - 0.12f * (float)(lost_l + lost_r);
+        if (health_mod < 0.40f) health_mod = 0.40f;
+        if (vv->modules[VEH_ENGINE].destroyed) health_mod *= 0.45f;
+        accel *= health_mod;
+        max_speed *= health_mod;
+        /* A missing left/right wheel pulls the vehicle to the other side. */
+        if ((veh_type == 0 || veh_type == 2) && wl > 0.05f) {
+            float drift = (float)(lost_r - lost_l) * 0.35f;
+            if (fabsf(drift) > 0.001f) {
+                Vec3 rt = v3(cosf(p->yaw), 0, sinf(p->yaw));
+                wish = v3add(wish, v3mul(rt, drift));
+                float wl2 = v3len(wish);
+                if (wl2 > 1.0f) wish = v3mul(wish, 1.0f / wl2);
+            }
+        }
+    }
     if (p->dodge_timer > 0) { accel = 0; max_speed = 18.0f; }
+    if (veh_type < 0) max_speed *= game_player_speed_mult(p);
     Vec3 hv = v3(p->vel.x, 0, p->vel.z);
     if (wl > 0.05f) {
         float cur = v3dot(hv, wish);
@@ -1203,8 +2195,17 @@ static void update_player_movement(Game* g, Player* p, float dt) {
         if (fabsf(p->vel.x) < 0.02f) p->vel.x = 0;
         if (fabsf(p->vel.z) < 0.02f) p->vel.z = 0;
     }
-    p->vel.y -= (g->gravity > 1.0f ? g->gravity : 24.0f) * dt;
-    if (p->vel.y < -55.0f) p->vel.y = -55.0f;
+    if (veh_type == 1) {
+        /* Manta: cheap hover, no aerodynamic simulation. Jump climbs,
+         * crouch descends, otherwise it holds altitude. */
+        p->vel.y = 0.0f;
+        if (p->input.jump) p->vel.y = 9.5f;
+        else if (p->input.crouch) p->vel.y = -8.5f;
+        if (p->pos.y < 1.4f) p->vel.y = fmaxf(p->vel.y, 2.0f);
+    } else {
+        p->vel.y -= (g->gravity > 1.0f ? g->gravity : 24.0f) * dt;
+        if (p->vel.y < -55.0f) p->vel.y = -55.0f;
+    }
 
     bool grounded = false, hit_wall = false;
     int ga = -1;
@@ -1750,6 +2751,7 @@ void game_demo_input(Game* g, float dt) {
 
 static void bot_think(Game* g, Player* p, float dt) {
     if (!p->alive) return;
+    p->input.use = false;
     p->bot_think_t -= dt;
     if (p->bot_think_t > 0) return;
     p->bot_think_t = frandr(0.08f, 0.16f);
@@ -1765,6 +2767,7 @@ static void bot_think(Game* g, Player* p, float dt) {
         Player* o = &g->players[i];
         if (!o->active || !o->alive) continue;
         if (o->protection > 0) continue;
+        if (g->game_mode == GM_INVASION && !o->zombie) continue;
         if (game_mode_team_based(g->game_mode) && p->team >= 0 && o->team == p->team) continue;
         float ddx = o->pos.x - p->pos.x, ddy = o->pos.y - p->pos.y, ddz = o->pos.z - p->pos.z;
         if (ddx * ddx + ddy * ddy + ddz * ddz > 95.0f * 95.0f) continue;
@@ -1779,6 +2782,48 @@ static void bot_think(Game* g, Player* p, float dt) {
     float tdist = target ? v3len(v3sub(target->pos, p->pos)) : 100.0f;
     p->bot_weapon_pref = bot_pick_weapon(g, p, tdist);
     if (p->weapon != p->bot_weapon_pref && p->fire_timer <= 0) p->weapon = p->bot_weapon_pref;
+
+    /* vehicles: board a free team vehicle when not in close combat, then
+     * drive toward the objective. Only 16 vehicles exist, so only nearby
+     * bots ever look for a ride. */
+    int board_vehicle = -1;
+    bool vehicle_map = (g->game_mode == GM_VCTF || g->game_mode == GM_ONSLAUGHT ||
+                        g->game_mode == GM_CONQUEST) && g->vehicle_count > 0 &&
+                       (!g->networked || g->server_mode);
+    if (vehicle_map) {
+        p->bot_vehicle_t -= dt;
+        if (p->in_vehicle) {
+            p->bot_vehicle_target = -1;
+        } else {
+            if (p->bot_vehicle_target >= 0 && p->bot_vehicle_target < g->vehicle_count) {
+                Vehicle* bv = &g->vehicles[p->bot_vehicle_target];
+                if (!bv->active || bv->driver >= 0) p->bot_vehicle_target = -1;
+            }
+            if (p->bot_vehicle_target < 0 && p->bot_vehicle_t <= 0 && (!target || tdist > 18.0f)) {
+                p->bot_vehicle_t = frandr(2.0f, 4.0f);
+                float best = 60.0f * 60.0f;
+                for (int i = 0; i < g->vehicle_count; i++) {
+                    Vehicle* v = &g->vehicles[i];
+                    if (!v->active || v->driver >= 0) continue;
+                    if (v->team >= 0 && p->team >= 0 && v->team != p->team) continue;
+                    float dx = v->pos.x - p->pos.x, dz = v->pos.z - p->pos.z;
+                    float d = dx * dx + dz * dz;
+                    if (d < best) { best = d; p->bot_vehicle_target = i; }
+                }
+            }
+            if (p->bot_vehicle_target >= 0 && p->bot_vehicle_target < g->vehicle_count) {
+                Vehicle* bv = &g->vehicles[p->bot_vehicle_target];
+                float dx = bv->pos.x - p->pos.x, dz = bv->pos.z - p->pos.z;
+                if (dx * dx + dz * dz < 6.0f * 6.0f) {
+                    p->input.use = true;          /* update_vehicle_use runs next frame */
+                    p->bot_vehicle_target = -1;
+                    p->bot_vehicle_t = frandr(3.0f, 5.0f);
+                } else {
+                    board_vehicle = p->bot_vehicle_target;
+                }
+            }
+        }
+    }
 
     /* navigation goal */
     Vec3 goal = p->pos;
@@ -1825,6 +2870,10 @@ static void bot_think(Game* g, Player* p, float dt) {
                 if (d < best) { best = d; goal = a->pos; }
             }
         }
+        have_goal = true;
+    }
+    if (board_vehicle >= 0 && board_vehicle < g->vehicle_count) {
+        goal = g->vehicles[board_vehicle].pos;
         have_goal = true;
     }
 
@@ -1874,6 +2923,17 @@ static void bot_think(Game* g, Player* p, float dt) {
         }
     }
     if (!have_move) { move_target = p->pos; have_move = true; }
+
+    /* Boarding: nav nodes can end several units away from a parked vehicle.
+     * Close the last metres with direct steering so bots actually reach it. */
+    if (board_vehicle >= 0 && board_vehicle < g->vehicle_count) {
+        Vehicle* bv = &g->vehicles[board_vehicle];
+        float dx = bv->pos.x - p->pos.x, dz = bv->pos.z - p->pos.z;
+        if (dx * dx + dz * dz < 16.0f * 16.0f) {
+            move_target = bv->pos;
+            have_move = true;
+        }
+    }
 
     /* edge probe: never walk straight into lava or off a ledge */
     bool edge_ahead = false;
@@ -1993,6 +3053,7 @@ static void bot_think(Game* g, Player* p, float dt) {
     if (!edge_ahead && frand() < 0.03f + (1.0f - skill) * 0.02f) p->input.jump = true;
     else p->input.jump = false;
     if (!edge_ahead && frand() < 0.02f) p->input.dodge = true;
+    if (p->in_vehicle) { p->input.jump = false; p->input.dodge = false; p->input.crouch = false; }
 
     /* fire: bots call game_fire directly so fast weapons are not limited to
      * the edge-triggered input latch. */
@@ -2018,6 +3079,16 @@ static void bot_think(Game* g, Player* p, float dt) {
         if (p->weapon == WPN_SHOCK && frand() < 0.30f) alt = true;
         if (p->weapon == WPN_FLAK && dist < 12.0f && frand() < 0.35f) alt = true;
         game_fire(g, p, alt);
+    }
+    /* vehicle weapons do not use player ammo */
+    if (p->in_vehicle && target && visible && p->vehicle >= 0 && p->vehicle < g->vehicle_count) {
+        Vehicle* v = &g->vehicles[p->vehicle];
+        if (v->active && v->fire_timer <= 0.0f && dist < 95.0f) {
+            Vec3 aim = v3(sinf(p->yaw) * cosf(p->pitch), sinf(p->pitch), -cosf(p->yaw) * cosf(p->pitch));
+            Vec3 to = v3norm(v3sub(player_eye(target), player_eye(p)));
+            float need = v->type == 2 ? 0.95f : 0.90f;
+            if (v3dot(aim, to) > need) game_fire(g, p, false);
+        }
     }
     /* reload / switch when empty */
     if (p->ammo[p->weapon] <= 0) {
@@ -2055,6 +3126,7 @@ static void bot_think_lite(Game* g, Player* p, float dt) {
     }
     p->input.move_z = 0.75f;
     p->input.move_x = 0;
+    p->input.use = false;
     p->input.fire = false;
     p->input.alt_fire = false;
     p->input.jump = false;
@@ -2234,15 +3306,46 @@ static void update_nodes(Game* g, float dt) {
 /* Vehicles (VCTF)                                                     */
 /* ------------------------------------------------------------------ */
 static void update_vehicles(Game* g, float dt) {
+    Player* lp = (g->local_player >= 0 && g->local_player < g->num_players) ? &g->players[g->local_player] : NULL;
     for (int i = 0; i < g->vehicle_count; i++) {
         Vehicle* v = &g->vehicles[i];
+        if (v->fire_timer > 0.0f) v->fire_timer -= dt;
+        if (v->hit_flash > 0.0f) v->hit_flash = fmaxf(0.0f, v->hit_flash - dt * 3.0f);
         if (!v->active) {
             v->respawn -= dt;
-            if (v->respawn <= 0) {
+            /* wreck smoke: a few puffs per second, only near the local player */
+            if (v->respawn > 0.0f && lp) {
+                float wdx = v->pos.x - lp->pos.x, wdz = v->pos.z - lp->pos.z;
+                if (wdx * wdx + wdz * wdz < 90.0f * 90.0f) {
+                    v->smoke -= dt;
+                    if (v->smoke <= 0.0f) {
+                        v->smoke = 0.34f;
+                        Vec3 wp = v3(v->pos.x + frandr(-0.6f, 0.6f), v->pos.y + 0.7f,
+                                     v->pos.z + frandr(-0.6f, 0.6f));
+                        game_add_particle(g, wp,
+                                          v3(frandr(-0.4f, 0.4f), frandr(1.4f, 2.8f), frandr(-0.4f, 0.4f)),
+                                          col(0.12f, 0.115f, 0.11f, 0.55f),
+                                          frandr(0.7f, 1.4f), frandr(1.0f, 1.9f), false, 0.3f, 1.0f);
+                    }
+                }
+            }
+            /* Only the host (or offline game) respawns a wreck. Clients wait
+             * for the authoritative vehicle packet so the timer is identical
+             * for every player. */
+            if (v->respawn <= 0.0f && (!g->networked || g->server_mode)) {
                 v->active = true;
                 v->pos = v->home;
-                v->hp = 250.0f;
+                v->hp = v->max_hp;
                 v->driver = -1;
+                v->killer = -1;
+                v->pitch = 0.0f;
+                v->fire_timer = 0.0f;
+                v->hit_flash = 0.0f;
+                v->smoke = 0.0f;
+                for (int k = 0; k < VEH_MODULES; k++) {
+                    v->modules[k].hp = v->modules[k].max_hp;
+                    v->modules[k].destroyed = false;
+                }
             }
             continue;
         }
@@ -2254,9 +3357,52 @@ static void update_vehicles(Game* g, float dt) {
             } else {
                 v->pos = p->pos;
                 v->yaw = p->yaw;
+                v->pitch = p->pitch * 0.45f;
+                if (v->type == 1) v->pitch += clampf(-p->vel.y * 0.025f, -0.25f, 0.25f);
+            }
+        } else {
+            /* parked vehicles slowly repair so a damaged motor pool does not
+             * become useless; no collision/physics work while empty */
+            if (v->hp < v->max_hp) v->hp = fminf(v->max_hp, v->hp + 9.0f * dt);
+        }
+        /* damage smoke: cheap, only for nearby vehicles and only a few
+         * particles per second. A destroyed engine or wheel smokes too. */
+        bool mod_broken = v->modules[VEH_ENGINE].destroyed;
+        for (int k = 0; k < VEH_WHEELS; k++) if (v->modules[k].destroyed) mod_broken = true;
+        if ((v->hp < v->max_hp * 0.42f || mod_broken) && lp) {
+            float dx = v->pos.x - lp->pos.x, dz = v->pos.z - lp->pos.z;
+            if (dx * dx + dz * dz < 80.0f * 80.0f) {
+                v->smoke -= dt;
+                if (v->smoke <= 0.0f) {
+                    v->smoke = v->modules[VEH_ENGINE].destroyed ? 0.14f : 0.22f;
+                    Vec3 pnt = v3(v->pos.x + frandr(-0.7f, 0.7f), v->pos.y + 0.8f, v->pos.z + frandr(-0.7f, 0.7f));
+                    game_add_particle(g, pnt, v3(frandr(-0.4f, 0.4f), frandr(1.2f, 2.4f), frandr(-0.4f, 0.4f)),
+                                      col(0.18f, 0.17f, 0.16f, 0.55f), frandr(0.5f, 1.1f), frandr(0.8f, 1.4f), false, 0.4f, 1.0f);
+                }
             }
         }
     }
+}
+
+static void vehicle_exit(Game* g, Player* p) {
+    int vi = p->vehicle;
+    if (vi >= 0 && vi < g->vehicle_count) {
+        Vehicle* v = &g->vehicles[vi];
+        v->driver = -1;
+        v->pos = p->pos;
+        v->yaw = p->yaw;
+    }
+    p->in_vehicle = false;
+    p->vehicle = -1;
+    p->vel = v3(0, 0, 0);
+    p->grounded = false;
+    p->use_latch = true;
+    /* step out to the side instead of standing inside the hull */
+    Vec3 right = v3(cosf(p->yaw), 0, sinf(p->yaw));
+    p->pos = v3add(p->pos, v3mul(right, 2.1f));
+    p->pos.x = clampf(p->pos.x, -37.0f, 37.0f);
+    p->pos.z = clampf(p->pos.z, -37.0f, 37.0f);
+    (void)g;
 }
 
 static void update_vehicle_use(Game* g, Player* p) {
@@ -2264,10 +3410,7 @@ static void update_vehicle_use(Game* g, Player* p) {
     if (p->use_latch) return;
     p->use_latch = true;
     if (p->in_vehicle) {
-        int vi = p->vehicle;
-        if (vi >= 0 && vi < g->vehicle_count) g->vehicles[vi].driver = -1;
-        p->in_vehicle = false;
-        p->vehicle = -1;
+        vehicle_exit(g, p);
         if (p->id == g->local_player) game_pickup_msg(g, "Vehicle left");
         return;
     }
@@ -2277,19 +3420,164 @@ static void update_vehicle_use(Game* g, Player* p) {
         Vehicle* v = &g->vehicles[i];
         if (!v->active || v->driver >= 0) continue;
         float dx = v->pos.x - p->pos.x, dz = v->pos.z - p->pos.z;
+        float dy = v->pos.y - p->pos.y;
         float d = dx * dx + dz * dz;
-        if (d < bd) { bd = d; best = i; }
+        if (d < bd && fabsf(dy) < 4.0f) { bd = d; best = i; }
     }
     if (best >= 0) {
         Vehicle* v = &g->vehicles[best];
         v->driver = p->id;
         p->in_vehicle = true;
         p->vehicle = best;
+        p->pos = v->pos;
+        p->vel = v3(0, 0, 0);
+        if (v->type == 1) p->pos.y = fmaxf(v->pos.y, v->home.y);
         if (p->id == g->local_player) {
-            game_pickup_msg(g, "%s ready - E to exit", v->type == 1 ? "Manta" : (v->type == 2 ? "Goliath" : "Scorpion"));
+            game_pickup_msg(g, "%s ready - E to exit, fire = %s", game_vehicle_name(v->type),
+                            v->type == 2 ? "cannon" : "plasma");
             audio_play(SFX_PICKUP_WEAPON, 0.5f, 0);
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Zombie Invasion (Back4Blood / Unreal Invasion inspired)             */
+/* ------------------------------------------------------------------ */
+const char* game_zombie_name(int type) {
+    switch (type) {
+    case 1: return "RUNNER";
+    case 2: return "BRUTE";
+    case 3: return "SPITTER";
+    default: return "WALKER";
+    }
+}
+
+static void zombie_stats(int type, int wave, float* hp, float* speed, float* dmg, float* cd) {
+    int w = wave < 1 ? 1 : wave;
+    switch (type) {
+    case 1: *hp = 45.0f + (float)w * 5.0f;  *speed = 0.95f; *dmg = 7.0f;  *cd = 0.75f; break;
+    case 2: *hp = 300.0f + (float)w * 34.0f; *speed = 0.48f; *dmg = 26.0f; *cd = 1.45f; break;
+    case 3: *hp = 75.0f + (float)w * 8.0f;   *speed = 0.55f; *dmg = 12.0f; *cd = 2.10f; break;
+    default:*hp = 70.0f + (float)w * 7.0f;   *speed = 0.62f; *dmg = 10.0f; *cd = 1.10f; break;
+    }
+}
+
+static Vec3 zombie_spawn_pos(Game* g, Vec3 near) {
+    Vec3 c; float ext;
+    map_bounds(g->world, &c, &ext);
+    Vec3 best = near;
+    for (int tries = 0; tries < 10; tries++) {
+        float ang = frand() * 2.0f * PI;
+        float rad = frandr(16.0f, 34.0f);
+        Vec3 p = v3(near.x + cosf(ang) * rad, near.y + 7.0f, near.z + sinf(ang) * rad);
+        p.x = clampf(p.x, c.x - ext * 0.92f, c.x + ext * 0.92f);
+        p.z = clampf(p.z, c.z - ext * 0.92f, c.z + ext * 0.92f);
+        Ray down; down.origin = v3(p.x, near.y + 24.0f, p.z); down.dir = v3(0, -1, 0);
+        RayHit h;
+        if (world_raycast(g->world, down, 60.0f, true, &h) && h.normal.y > 0.45f) {
+            best = v3(p.x, h.point.y + 0.12f, p.z);
+            if (v3len(v3sub(best, near)) > 8.0f) return best;
+        }
+    }
+    return v3(near.x + frandr(-12, 12), near.y + 0.2f, near.z + frandr(-12, 12));
+}
+
+int game_spawn_zombie(Game* g, int type, Vec3 near) {
+    if (!g || g->game_mode != GM_INVASION) return -1;
+    if (type < 0 || type > 3) type = 0;
+    int limit = g->networked ? 32 : MAX_PLAYERS;
+    if (g->num_players >= limit) {
+        int free_slot = -1;
+        for (int i = g->invasion_survivors; i < g->num_players; i++) {
+            if (!g->players[i].active) { free_slot = i; break; }
+        }
+        if (free_slot < 0) return -1;
+    }
+    int slot = -1;
+    for (int i = g->invasion_survivors; i < g->num_players; i++) {
+        if (!g->players[i].active) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (g->num_players >= limit) return -1;
+        slot = g->num_players++;
+    }
+    Player* p = &g->players[slot];
+    init_player_slot(g, p, slot);
+    p->zombie = true;
+    p->zombie_type = type;
+    p->bot = true;
+    p->team = -1;
+    p->protection = 0.0f;
+    p->weapon = WPN_AR;
+    p->has[WPN_AR] = false;
+    p->ammo[WPN_AR] = 0;
+    p->pos = zombie_spawn_pos(g, near);
+    p->render_pos = p->pos;
+    Vec3 d = v3sub(near, p->pos);
+    p->yaw = atan2f(d.x, -d.z);
+    p->render_yaw = p->yaw;
+    p->vel = v3(0, 0, 0);
+    float hp, spd, dmg, cd;
+    zombie_stats(type, g->invasion_wave, &hp, &spd, &dmg, &cd);
+    p->health = hp;
+    p->armor = 0.0f;
+    p->zombie_attack = frandr(0.2f, 1.0f);
+    p->zombie_growl = frandr(0.5f, 3.0f);
+    p->bot_think_t = frandr(0.0f, 0.2f);
+    (void)spd; (void)dmg; (void)cd;
+    static const Color zc[4] = {
+        {0.34f, 0.44f, 0.24f, 1}, {0.55f, 0.62f, 0.32f, 1},
+        {0.42f, 0.28f, 0.20f, 1}, {0.35f, 0.72f, 0.30f, 1}
+    };
+    p->color = zc[type];
+    char nm[32];
+    snprintf(nm, sizeof(nm), "%s-%d", game_zombie_name(type), slot);
+    str_copy(p->name, nm, sizeof(p->name));
+    return slot;
+}
+
+int game_horde(Game* g, int count) {
+    if (!g || g->game_mode != GM_INVASION || count < 1) return 0;
+    int spawned = 0;
+    int survivors = g->invasion_survivors > 0 ? g->invasion_survivors : g->num_players;
+    for (int k = 0; k < count; k++) {
+        int t = 0;
+        float r = frand();
+        if (g->invasion_wave >= 6 && r < 0.18f) t = 3;
+        else if (g->invasion_wave >= 4 && r < 0.34f) t = 2;
+        else if (g->invasion_wave >= 2 && r < 0.62f) t = 1;
+        Vec3 near = g->team_base[0];
+        for (int tries = 0; tries < 8; tries++) {
+            int s = rand() % (survivors > 0 ? survivors : 1);
+            if (g->players[s].active && !g->players[s].zombie) { near = g->players[s].pos; break; }
+        }
+        if (game_spawn_zombie(g, t, near) < 0) break;
+        spawned++;
+    }
+    g->invasion_spawn_left = 0;
+    return spawned;
+}
+
+static void invasion_start_wave(Game* g);
+
+void game_next_wave(Game* g) {
+    if (!g || g->game_mode != GM_INVASION) return;
+    /* Force the next wave: clear the field, then run the normal director. */
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->active && p->zombie) { p->active = false; p->alive = false; }
+    }
+    g->invasion_spawn_left = 0;
+    g->invasion_alive = 0;
+    invasion_start_wave(g);
+}
+
+int game_invasion_survivors_alive(Game* g) {
+    if (!g) return 0;
+    int n = 0;
+    for (int i = 0; i < g->num_players; i++)
+        if (g->players[i].active && g->players[i].alive && !g->players[i].zombie) n++;
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2329,11 +3617,192 @@ static void update_zone(Game* g, float dt) {
     }
 }
 
+static void zombie_think(Game* g, Player* p, float dt, bool lite) {
+    if (!p || !p->alive || !p->zombie) return;
+    if (p->zombie_attack > 0.0f) p->zombie_attack -= dt;
+    p->zombie_growl -= dt;
+    p->bot_think_t -= dt;
+    if (p->bot_think_t > 0.0f) return;
+    p->bot_think_t = lite ? frandr(0.42f, 0.85f) : frandr(0.12f, 0.28f);
+
+    float hp, spd, dmg, cd;
+    zombie_stats(p->zombie_type, g->invasion_wave, &hp, &spd, &dmg, &cd);
+    (void)hp;
+
+    int survivors = g->invasion_survivors > 0 ? g->invasion_survivors : g->num_players;
+    if (survivors > g->num_players) survivors = g->num_players;
+    Player* target = NULL;
+    float best = 1e18f;
+    for (int i = 0; i < survivors; i++) {
+        Player* o = &g->players[i];
+        if (!o->active || !o->alive || o->zombie) continue;
+        float dx = o->pos.x - p->pos.x, dy = o->pos.y - p->pos.y, dz = o->pos.z - p->pos.z;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < best) { best = d2; target = o; }
+    }
+    if (!target) {
+        p->input.move_z = 0;
+        p->input.move_x = 0;
+        return;
+    }
+    Vec3 d = v3sub(target->pos, p->pos);
+    float dist = sqrtf(d.x * d.x + d.z * d.z);
+    float want = atan2f(d.x, -d.z);
+    p->yaw = angle_lerp(p->yaw, want, lite ? 0.18f : 0.38f);
+    float fwd = clampf((dist - 1.5f) / 5.0f, 0.12f, 1.0f) * spd;
+    p->input.move_z = fwd;
+    p->input.move_x = sinf(g->time * 1.7f + (float)p->id * 0.91f) * 0.18f;
+    p->input.jump = false;
+    p->input.crouch = false;
+    p->input.fire = false;
+    p->input.dodge = false;
+    p->input.yaw = p->yaw;
+    p->input.pitch = 0.0f;
+
+    if (dist < 2.35f && p->zombie_attack <= 0.0f) {
+        Vec3 hit = v3(target->pos.x, target->pos.y + 1.0f, target->pos.z);
+        game_damage(g, target, dmg, p->id, v3norm(d), hit, WPN_FLAK);
+        p->zombie_attack = cd;
+        for (int k = 0; k < 5; k++) {
+            Vec3 v = v3norm(v3(frandr(-1, 1), frandr(0.0f, 1.0f), frandr(-1, 1)));
+            game_add_particle(g, hit, v3mul(v, frandr(1.0f, 3.0f)),
+                              p->zombie_type == 3 ? col3(0.5f, 1.0f, 0.3f) : col3(0.65f, 0.12f, 0.08f),
+                              frandr(0.08f, 0.2f), frandr(0.2f, 0.5f), true, 4.0f, 1.2f);
+        }
+    } else if (!lite && p->zombie_type == 3 && p->zombie_attack <= 0.0f &&
+               dist > 4.0f && dist < 34.0f) {
+        /* spitter: one cheap acid projectile, no complex ballistics */
+        Vec3 eye = v3(p->pos.x, p->pos.y + 1.35f, p->pos.z);
+        Vec3 aim = v3(target->pos.x, target->pos.y + 1.0f, target->pos.z);
+        Vec3 dir = v3norm(v3sub(aim, eye));
+        Ray r; r.origin = eye; r.dir = dir;
+        RayHit h;
+        if (!world_raycast(g->world, r, dist, true, &h) || h.t > dist - 0.8f) {
+            for (int i = 0; i < MAX_PROJECTILES; i++) {
+                Projectile* pr = &g->projs[i];
+                if (pr->active) continue;
+                memset(pr, 0, sizeof(*pr));
+                pr->active = true;
+                pr->type = WPN_SHOCK;
+                pr->owner = p->id;
+                pr->pos = eye;
+                pr->vel = v3mul(dir, 24.0f);
+                pr->life = 3.0f;
+                pr->damage = dmg;
+                pr->splash = 2.5f;
+                pr->radius = 2.6f;
+                pr->gravity = 3.0f;
+                pr->color = col3(0.45f, 1.0f, 0.28f);
+                p->zombie_attack = cd;
+                break;
+            }
+        }
+    }
+    if (p->zombie_growl <= 0.0f) {
+        p->zombie_growl = frandr(3.0f, 7.0f);
+        Player* lp = (g->local_player >= 0 && g->local_player < g->num_players) ? &g->players[g->local_player] : NULL;
+        if (lp && v3len(v3sub(lp->pos, p->pos)) < 26.0f) audio_play_at(SFX_HIT, 0.25f, p->pos.x, p->pos.y, p->pos.z,
+                                                                       lp->pos.x, lp->pos.y, lp->pos.z, sinf(lp->yaw), -cosf(lp->yaw));
+    }
+}
+
+static void invasion_start_wave(Game* g) {
+    g->invasion_wave++;
+    int survivors = g->invasion_survivors > 0 ? g->invasion_survivors : g->num_players;
+    int count = 6 + g->invasion_wave * 5 + (survivors - 1) * 4;
+    int free_slots = MAX_PLAYERS - g->num_players;
+    for (int i = g->invasion_survivors; i < g->num_players; i++)
+        if (!g->players[i].active) free_slots++;
+    if (g->networked) {
+        int room = 32 - survivors;
+        if (room < 0) room = 0;
+        if (free_slots > room) free_slots = room;
+    }
+    if (count > free_slots) count = free_slots;
+    if (count < 0) count = 0;
+    g->invasion_spawn_left = count;
+    g->invasion_spawn_timer = 0.0f;
+    g->invasion_alive = 0;
+    g->invasion_wave_timer = 0.0f;
+    char b[96];
+    snprintf(b, sizeof(b), "WAVE %d / %d  -  %d HOSTILES", g->invasion_wave, g->invasion_wave_max, count);
+    game_announce(g, b, col3(0.55f, 1.0f, 0.32f), 3.2f);
+    if (g->invasion_wave > g->invasion_best_wave) g->invasion_best_wave = g->invasion_wave;
+}
+
+static void update_invasion(Game* g, float dt) {
+    if (g->game_mode != GM_INVASION) return;
+    if (g->networked && !g->server_mode) {
+        int alive = 0;
+        for (int i = 0; i < g->num_players; i++)
+            if (g->players[i].active && g->players[i].alive && g->players[i].zombie) alive++;
+        g->invasion_alive = alive;
+        return;
+    }
+    if (g->match_over) return;
+    int alive = 0;
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->active && p->alive && p->zombie) alive++;
+    }
+    g->invasion_alive = alive;
+    int survivors_alive = game_alive_count(g);
+    if (g->started && g->match_time > 1.0f && survivors_alive <= 0) {
+        g->match_over = true;
+        g->invasion_victory = false;
+        g->winner = -1;
+        snprintf(g->result, sizeof(g->result), "OVERRUN ON WAVE %d", g->invasion_wave > 0 ? g->invasion_wave : 1);
+        game_announce(g, "SURVIVORS OVERRUN", col3(1.0f, 0.22f, 0.16f), 5.0f);
+        return;
+    }
+    if (g->invasion_spawn_left > 0) {
+        g->invasion_spawn_timer -= dt;
+        float interval = g->invasion_wave <= 2 ? 0.45f : 0.24f;
+        if (g->invasion_wave >= 6) interval = 0.12f;
+        if (g->num_players > 200) interval = 0.055f;
+        int guard = 0;
+        while (g->invasion_spawn_left > 0 && g->invasion_spawn_timer <= 0.0f && guard++ < 64) {
+            int t = 0;
+            float r = frand();
+            if (g->invasion_wave >= 6 && r < 0.16f) t = 3;
+            else if (g->invasion_wave >= 4 && r < 0.30f) t = 2;
+            else if (g->invasion_wave >= 2 && r < 0.62f) t = 1;
+            int s = rand() % (g->invasion_survivors > 0 ? g->invasion_survivors : 1);
+            if (!g->players[s].active || g->players[s].zombie) {
+                s = 0;
+                for (int k = 0; k < g->invasion_survivors; k++)
+                    if (g->players[k].active && !g->players[k].zombie) { s = k; break; }
+            }
+            if (game_spawn_zombie(g, t, g->players[s].pos) < 0) break;
+            g->invasion_spawn_left--;
+            g->invasion_spawn_timer += interval;
+        }
+    } else if (alive == 0) {
+        g->invasion_wave_timer -= dt;
+        if (g->invasion_wave_timer <= 0.0f) {
+            if (g->invasion_wave >= g->invasion_wave_max) {
+                g->match_over = true;
+                g->invasion_victory = true;
+                g->winner = g->local_player;
+                snprintf(g->result, sizeof(g->result), "ALL %d WAVES CLEARED - SURVIVORS WIN", g->invasion_wave_max);
+                game_announce(g, "INVASION CLEARED", col3(1.0f, 0.85f, 0.25f), 5.0f);
+            } else {
+                invasion_start_wave(g);
+            }
+        }
+    } else {
+        g->invasion_wave_timer = 8.0f;
+    }
+}
+
 void game_update(Game* g, float dt) {
     if (dt > 0.05f) dt = 0.05f;
     g->time += dt;
     g->elapsed += dt;
     if (g->paused) return;
+    game_update_nature(g, dt);
+    if (g->match_over) g->match_over_t += dt;
+    if (g->match_over && !g->rewards_granted) grant_match_rewards(g);
 
     if (g->hitmarker > 0) g->hitmarker -= dt;
     if (g->damage_flash > 0) g->damage_flash -= dt * 2.2f;
@@ -2364,8 +3833,11 @@ void game_update(Game* g, float dt) {
         Player* p = &g->players[i];
         if (!p->active) continue;
         p->input.dodge = false;
-        update_vehicle_use(g, p);
-        if (p->bot) {
+        if (!p->zombie) update_vehicle_use(g, p);
+        if (p->zombie) {
+            /* Host/offline simulates. Clients mirror the snapshot. */
+            if (!g->networked || g->server_mode) zombie_think(g, p, dt, g->num_players > 160);
+        } else if (p->bot) {
             if (g->start_countdown > 0) { p->input.fire = false; p->input.move_x = 0; p->input.move_z = 0; }
             else if (g->num_players > 96 && i >= 64) bot_think_lite(g, p, dt);
             else bot_think(g, p, dt);
@@ -2386,6 +3858,7 @@ void game_update(Game* g, float dt) {
     update_nodes(g, dt);
     update_vehicles(g, dt);
     update_zone(g, dt);
+    update_invasion(g, dt);
     if (g->demo_mode && g->local_player >= 0 && g->local_player < g->num_players) {
         /* follow */
     }
@@ -2469,28 +3942,39 @@ void game_render_players(Game* g, Renderer* r) {
     int li = g->local_player;
     if (li < 0 || li >= g->num_players) li = 0;
     Vec3 eye = g->players[li].pos;
-    int full_budget = 28;
+    bool horde = g->num_players > 200;
+    int full_budget = horde ? 14 : 28;
+    float far_draw = horde ? 125.0f : 170.0f;
+    float lod_draw = horde ? 38.0f : 55.0f;
     for (int i = 0; i < g->num_players; i++) {
         Player* p = &g->players[i];
         if (!p->active) continue;
         float ddx = p->pos.x - eye.x, ddz = p->pos.z - eye.z;
         float d2 = ddx * ddx + ddz * ddz;
-        if (g->num_players > 40) {
-            if (d2 > 170.0f * 170.0f) continue;
-            if (p->alive && i != li && (d2 > 55.0f * 55.0f || full_budget <= 0)) {
-                draw_box(r, v3(p->pos.x, p->pos.y + 0.9f, p->pos.z), v3(0.72f, 1.55f, 0.5f), p->color, 11, p->yaw, 0.04f);
-                continue;
-            }
+        if (d2 > far_draw * far_draw) continue;
+        if (p->alive && i != li && (d2 > lod_draw * lod_draw || full_budget <= 0)) {
+            Vec3 s = p->zombie ? v3(0.62f, 1.48f, 0.48f) : v3(0.72f, 1.55f, 0.5f);
+            draw_box(r, v3(p->pos.x, p->pos.y + 0.9f, p->pos.z), s, p->color, 11, p->yaw, p->zombie ? 0.02f : 0.04f);
+            continue;
         }
         if (!p->alive) {
-            /* corpse-ish flattened blocks fade */
-            Color c = col_mul(p->color, 0.35f);
-            draw_box(r, v3(p->pos.x, p->pos.y + 0.15f, p->pos.z), v3(1.1f, 0.3f, 0.7f), c, 15, p->yaw, 0);
+            /* Corpse dissolve is driven by death_time, which the host sends in
+             * the snapshot. Every client therefore sees the same lifetime and
+             * the same final fade instead of a locally drifting ragdoll. */
+            float ct = p->death_time;
+            if (ct >= 12.0f) continue;
+            float fade = ct > 9.0f ? clamp01(1.0f - (ct - 9.0f) / 3.0f) : 1.0f;
+            float sink = ct > 9.0f ? (ct - 9.0f) / 3.0f * 0.22f : 0.0f;
+            Color c = col_mul(p->color, 0.18f + 0.20f * fade);
+            c.a = 0.9f * fade;
+            draw_box(r, v3(p->pos.x, p->pos.y + 0.15f - sink, p->pos.z),
+                     v3(1.1f, 0.3f * (0.55f + 0.45f * fade), 0.7f), c, 15, p->yaw, 0);
             continue;
         }
         if (i != li) full_budget--;
         Color team = p->color;
-        Color dark = col3(0.18f, 0.20f, 0.24f);
+        Color dark = p->zombie ? col3(0.12f, 0.11f, 0.09f) : col3(0.18f, 0.20f, 0.24f);
+        Color skin = p->zombie ? col3(0.40f, 0.52f, 0.25f) : col3(0.72f, 0.65f, 0.58f);
         float yaw = p->render_yaw;
         Vec3 f = v3(sinf(yaw), 0, -cosf(yaw));
         Vec3 rt = v3(cosf(yaw), 0, sinf(yaw));
@@ -2516,20 +4000,29 @@ void game_render_players(Game* g, Renderer* r) {
         for (int s = -1; s <= 1; s += 2) {
             Vec3 sh = v3add(base, v3add(v3mul(rt, s * 0.44f), v3(0, 1.34f + crouch, 0)));
             draw_box(r, sh, v3(0.26f, 0.24f, 0.34f), team, 11, yaw, 0.08f);
-            Vec3 hand = v3add(sh, v3add(v3mul(f, 0.34f), v3mul(rt, -s * 0.06f)));
-            hand.y -= 0.22f;
-            draw_box(r, v3lerp(sh, hand, 0.55f), v3(0.17f, 0.5f, 0.19f), dark, 0, yaw, 0);
+            Vec3 hand = v3add(sh, v3add(v3mul(f, p->zombie ? 0.62f : 0.34f), v3mul(rt, -s * 0.06f)));
+            hand.y -= p->zombie ? 0.04f : 0.22f;
+            draw_box(r, v3lerp(sh, hand, 0.55f), v3(0.17f, p->zombie ? 0.36f : 0.5f, 0.19f), dark, 0, yaw, 0);
         }
         /* head + helmet */
         Vec3 head = v3add(base, v3(0, 1.66f + crouch, 0));
-        renderer_draw_model(r, &r->sphere, mat4_from_trs(head, v3(0, yaw, 0), v3(0.34f, 0.36f, 0.34f)), col3(0.72f, 0.65f, 0.58f), 0, 0, 1, false);
-        draw_box(r, v3add(head, v3(0, 0.13f, 0)), v3(0.38f, 0.16f, 0.38f), team, 11, yaw, 0.08f);
-        /* visor */
-        Vec3 visor = v3add(head, v3mul(f, 0.14f));
-        visor.y += 0.02f;
-        draw_box(r, visor, v3(0.28f, 0.09f, 0.08f), col(0.15f, 0.85f, 1.0f, 1.0f), 5, yaw, 1.4f);
+        renderer_draw_model(r, &r->sphere, mat4_from_trs(head, v3(0, yaw, 0), v3(0.34f, 0.36f, 0.34f)), skin, 0, 0, 1, false);
+        if (!p->zombie) {
+            draw_box(r, v3add(head, v3(0, 0.13f, 0)), v3(0.38f, 0.16f, 0.38f), team, 11, yaw, 0.08f);
+            Vec3 visor = v3add(head, v3mul(f, 0.14f));
+            visor.y += 0.02f;
+            draw_box(r, visor, v3(0.28f, 0.09f, 0.08f), col(0.15f, 0.85f, 1.0f, 1.0f), 5, yaw, 1.4f);
+        } else {
+            /* glowing predator eyes instead of a helmet visor */
+            Color ec = p->zombie_type == 3 ? col(0.55f, 1.0f, 0.25f, 1.0f) : col(1.0f, 0.22f, 0.10f, 1.0f);
+            for (int s = -1; s <= 1; s += 2) {
+                Vec3 e = v3add(head, v3add(v3mul(f, 0.16f), v3mul(rt, s * 0.10f)));
+                e.y += 0.03f;
+                draw_box(r, e, v3(0.08f, 0.05f, 0.05f), ec, 5, yaw, 1.8f);
+            }
+        }
         /* weapon in hands */
-        if (p->weapon >= 0 && p->has[p->weapon]) {
+        if (!p->zombie && p->weapon >= 0 && p->has[p->weapon]) {
             WeaponDef* wd = &weapon_defs[p->weapon];
             Vec3 gun = v3add(base, v3add(v3mul(f, 0.42f), v3(0, 1.08f + crouch, 0)));
             float gl = p->weapon == WPN_ROCKET ? 1.0f : (p->weapon == WPN_FLAK ? 0.8f : 0.9f);
@@ -2729,23 +4222,132 @@ void game_render_objectives(Game* g, Renderer* r) {
             draw_box(r, v3(n->pos.x, n->pos.y + 1.2f + n->progress * 1.4f, n->pos.z), v3(0.18f, n->progress * 2.8f, 0.18f), pc, 5, 0, 1.6f);
         }
     }
+    Player* lp = (g->local_player >= 0 && g->local_player < g->num_players) ? &g->players[g->local_player] : NULL;
     for (int i = 0; i < g->vehicle_count; i++) {
         Vehicle* v = &g->vehicles[i];
-        if (!v->active) continue;
-        Color c = team_base_color(v->team < 0 ? 0 : v->team);
-        Vec3 base = v3(v->pos.x, v->pos.y + 0.62f, v->pos.z);
-        Vec3 f = v3(sinf(v->yaw), 0, -cosf(v->yaw));
-        Vec3 rt = v3(cosf(v->yaw), 0, sinf(v->yaw));
-        draw_box(r, base, v3(2.3f, 0.55f, 1.35f), c, 11, v->yaw, 0.15f);
-        draw_box(r, v3add(base, v3mul(f, 0.55f)), v3(1.0f, 0.5f, 1.1f), col_mul(c, 0.7f), 0, v->yaw, 0.1f);
-        draw_box(r, v3add(base, v3(0, 0.42f, 0)), v3(0.9f, 0.16f, 0.8f), col3(0.2f, 0.6f, 1.0f), 5, v->yaw, 1.2f);
-        for (int s = -1; s <= 1; s += 2) for (int k = -1; k <= 1; k += 2) {
-            Vec3 w = v3add(base, v3add(v3mul(rt, s * 1.02f), v3mul(f, k * 0.85f)));
-            w.y -= 0.42f;
-            draw_box(r, w, v3(0.42f, 0.42f, 0.42f), col3(0.09f, 0.09f, 0.10f), 0, v->yaw, 0);
+        if (!v->active) {
+            /* destroyed hull: deterministic wreck that fades home at the same
+             * time on host and every client (respawn is replicated). */
+            if (v->respawn <= 0.0f) continue;
+            float fade = clamp01(v->respawn / 1.4f);
+            float sink = (1.0f - clamp01(v->respawn / 3.0f)) * 0.35f;
+            Vec3 wb = v3(v->pos.x, v->pos.y + (v->type == 1 ? -0.15f : 0.30f) - sink, v->pos.z);
+            Color charred = col(0.11f, 0.105f, 0.10f, 0.95f * fade);
+            Color ember = col(1.0f, 0.38f, 0.10f, 0.55f * fade);
+            draw_box(r, wb, v3(v->type == 2 ? 2.9f : 2.3f, 0.42f, v->type == 2 ? 2.0f : 1.5f),
+                     charred, 0, v->yaw, 0);
+            if (v->type == 2)
+                draw_box(r, v3(wb.x, wb.y + 0.45f, wb.z), v3(1.2f, 0.35f, 1.1f), charred, 0, v->yaw + 0.25f, 0);
+            if (fade > 0.3f) {
+                float pulse = 0.5f + 0.5f * sinf((float)i + v->respawn * 9.0f);
+                draw_box(r, v3(wb.x + 0.3f, wb.y + 0.20f, wb.z - 0.2f), v3(0.35f, 0.08f, 0.35f),
+                         col_mul(ember, 0.5f + pulse * 0.6f), 5, v->yaw, 1.1f);
+            }
+            continue;
         }
-        if (v->driver >= 0) {
-            draw_box(r, v3add(base, v3(0, 0.85f, 0)), v3(0.55f, 0.55f, 0.55f), col3(0.9f, 0.7f, 0.4f), 0, v->yaw, 0);
+        Color c = team_base_color(v->team < 0 ? 0 : v->team);
+        if (v->hit_flash > 0.01f) c = col_lerp(c, col3(1.0f, 0.92f, 0.7f), clamp01(v->hit_flash) * 0.55f);
+        float yaw = v->yaw;
+        Vec3 f = v3(sinf(yaw), 0, -cosf(yaw));
+        Vec3 rt = v3(cosf(yaw), 0, sinf(yaw));
+        float bob = sinf(v->bob * 2.0f + i) * (v->type == 1 ? 0.12f : 0.03f);
+        Vec3 base = v3(v->pos.x, v->pos.y + (v->type == 1 ? 0.12f : 0.52f) + bob, v->pos.z);
+        float dxp = lp ? v->pos.x - lp->pos.x : 0.0f;
+        float dzp = lp ? v->pos.z - lp->pos.z : 0.0f;
+        bool far = dxp * dxp + dzp * dzp > 130.0f * 130.0f;
+
+        if (far) {
+            draw_box(r, base, v3(2.4f, 0.8f, 1.5f), c, 11, yaw, 0.1f);
+        } else if (v->type == 0) {
+            /* Scorpion: low, fast buggy with four wheels and twin plasma */
+            draw_box(r, base, v3(2.25f, 0.42f, 1.28f), c, 11, yaw, 0.18f);
+            draw_box(r, v3add(base, v3add(v3mul(f, 0.95f), v3(0, 0.05f, 0))), v3(0.85f, 0.30f, 1.02f), col_mul(c, 0.72f), 0, yaw, 0.1f);
+            draw_box(r, v3add(base, v3(0, 0.30f, 0)), v3(0.72f, 0.22f, 0.62f), col(0.10f, 0.14f, 0.18f, 1.0f), 5, yaw, 0.5f);
+            if (!v->modules[VEH_WEAPON].destroyed) {
+                for (int s = -1; s <= 1; s += 2) {
+                    draw_box(r, v3add(base, v3add(v3mul(rt, s * 0.86f), v3mul(f, 0.55f))), v3(0.24f, 0.17f, 0.62f), col_mul(c, 1.15f), 4, yaw, 0.25f);
+                }
+            } else {
+                /* dead weapon: one melted, drooping barrel */
+                draw_box(r, v3add(base, v3add(v3mul(rt, 0.86f), v3mul(f, 0.50f))), v3(0.22f, 0.14f, 0.44f), col3(0.10f, 0.09f, 0.08f), 5, yaw + 0.2f, 0.1f);
+            }
+            for (int s = -1; s <= 1; s += 2) for (int k = -1; k <= 1; k += 2) {
+                int part = (k > 0 ? 0 : 2) + (s > 0 ? 1 : 0);
+                Vec3 w = v3add(base, v3add(v3mul(rt, s * 1.00f), v3mul(f, k * 0.78f)));
+                w.y -= 0.36f;
+                if (!v->modules[part].destroyed) {
+                    draw_box(r, w, v3(0.40f, 0.40f, 0.40f), col3(0.07f, 0.08f, 0.09f), 0, yaw, 0);
+                } else {
+                    /* detached wheel lying on the ground beside the buggy */
+                    Vec3 dw = v3(w.x + s * 0.55f, v->pos.y + 0.20f, w.z + (float)k * 0.35f);
+                    draw_box(r, dw, v3(0.42f, 0.42f, 0.18f), col3(0.06f, 0.065f, 0.07f), 0, yaw + 0.9f + (float)k * 0.4f, 0);
+                }
+            }
+        } else if (v->type == 1) {
+            /* Manta: hover craft, broad wings, glow underneath */
+            Vec3 tilt = v3add(base, v3mul(f, sinf(v->pitch) * 0.6f));
+            draw_box(r, tilt, v3(1.35f, 0.38f, 1.05f), c, 11, yaw, 0.2f);
+            for (int s = -1; s <= 1; s += 2) {
+                Vec3 wing = v3add(tilt, v3add(v3mul(rt, s * 1.05f), v3(0, -0.04f, 0)));
+                draw_box(r, wing, v3(1.15f, 0.16f, 0.78f), col_mul(c, 0.8f), 11, yaw + s * 0.18f, 0.15f);
+            }
+            for (int s = -1; s <= 1; s += 2) for (int k = -1; k <= 1; k += 2) {
+                int part = (k > 0 ? 0 : 2) + (s > 0 ? 1 : 0);
+                Vec3 pod = v3add(tilt, v3add(v3mul(rt, s * 1.05f), v3mul(f, k * 0.55f)));
+                if (!v->modules[part].destroyed) {
+                    draw_box(r, pod, v3(0.30f, 0.22f, 0.46f), col3(0.15f, 0.18f, 0.22f), 5, yaw, 0.4f);
+                } else {
+                    draw_box(r, v3(pod.x, v->pos.y + 0.22f, pod.z), v3(0.34f, 0.14f, 0.34f), col3(0.08f, 0.08f, 0.09f), 5, yaw + 0.7f, 0.1f);
+                }
+            }
+            if (!v->modules[VEH_WEAPON].destroyed)
+                draw_box(r, v3add(tilt, v3add(v3mul(f, -0.45f), v3(0, 0.22f, 0))), v3(0.55f, 0.26f, 0.55f), col(0.15f, 0.6f, 1.0f, 0.85f), 5, yaw, 0.9f);
+            else
+                draw_box(r, v3add(tilt, v3add(v3mul(f, -0.35f), v3(0, 0.14f, 0))), v3(0.45f, 0.18f, 0.42f), col3(0.10f, 0.10f, 0.11f), 5, yaw + 0.3f, 0.1f);
+            renderer_draw_model(r, &r->cylinder, mat4_from_trs(v3(tilt.x, tilt.y - 0.42f, tilt.z), v3(0, 0, 0), v3(0.9f, 0.05f, 0.9f)),
+                                col(0.25f, 0.7f, 1.0f, 0.55f), 5, 1.2f, 1.0f, false);
+        } else {
+            /* Goliath: heavy tank, tracks and turret barrel */
+            draw_box(r, base, v3(2.95f, 0.78f, 2.05f), c, 11, yaw, 0.08f);
+            for (int s = -1; s <= 1; s += 2) {
+                int part_f = (s > 0 ? 1 : 0), part_b = (s > 0 ? 3 : 2);
+                bool front_ok = !v->modules[part_f].destroyed;
+                bool rear_ok = !v->modules[part_b].destroyed;
+                Vec3 track = v3add(base, v3mul(rt, s * 1.32f));
+                track.y -= 0.24f;
+                if (front_ok || rear_ok) {
+                    draw_box(r, track, v3(0.48f, 0.72f, 2.25f), col3(0.08f, 0.09f, 0.10f), 0, yaw, 0);
+                    for (int k = -2; k <= 2; k++)
+                        if ((k >= 0) ? front_ok : rear_ok)
+                            draw_box(r, v3add(track, v3mul(f, (float)k * 0.42f)), v3(0.50f, 0.10f, 0.25f), col3(0.20f, 0.21f, 0.23f), 0, yaw, 0);
+                } else {
+                    /* both road wheels gone: broken track links in the dirt */
+                    for (int k = -1; k <= 1; k++)
+                        draw_box(r, v3(track.x + (float)k * 0.36f, v->pos.y + 0.16f, track.z + (float)k * 0.30f),
+                                 v3(0.44f, 0.12f, 0.30f), col3(0.07f, 0.07f, 0.08f), 0, yaw + 0.4f * (float)k, 0);
+                }
+            }
+            Vec3 turret = v3add(base, v3(0, 0.62f, 0));
+            draw_box(r, turret, v3(1.35f, 0.55f, 1.20f), col_mul(c, 0.85f), 11, yaw, 0.1f);
+            if (!v->modules[VEH_WEAPON].destroyed) {
+                Vec3 barrel = v3add(turret, v3add(v3mul(f, 1.35f), v3(0, 0.10f, 0)));
+                draw_box(r, barrel, v3(0.25f, 0.25f, 2.25f), col3(0.16f, 0.17f, 0.19f), 5, yaw, 0.2f);
+                draw_box(r, v3add(barrel, v3mul(f, 0.95f)), v3(0.34f, 0.34f, 0.34f), col3(0.30f, 0.31f, 0.33f), 5, yaw, 0.1f);
+            } else {
+                Vec3 barrel = v3add(turret, v3add(v3mul(f, 0.70f), v3(0, 0.02f, 0)));
+                draw_box(r, barrel, v3(0.24f, 0.20f, 1.10f), col3(0.09f, 0.09f, 0.09f), 5, yaw - 0.22f, 0.1f);
+            }
+        }
+        /* driver visible in open vehicles */
+        if (v->driver >= 0 && v->driver < g->num_players && !far) {
+            draw_box(r, v3add(base, v3(0, v->type == 2 ? 0.95f : 0.72f, 0)), v3(0.50f, 0.50f, 0.50f), col3(0.9f, 0.70f, 0.40f), 0, yaw, 0);
+        }
+        /* damage / HP bar */
+        if (!far && v->hp < v->max_hp - 0.5f) {
+            float t = clamp01(v->hp / v->max_hp);
+            Color hc = t > 0.5f ? col3(0.4f, 0.95f, 0.45f) : (t > 0.22f ? col3(1.0f, 0.75f, 0.2f) : col3(1.0f, 0.25f, 0.2f));
+            draw_box(r, v3(v->pos.x, v->pos.y + (v->type == 2 ? 2.45f : 1.75f), v->pos.z), v3(1.6f, 0.09f, 0.09f), col(0.05f, 0.06f, 0.07f, 0.8f), 15, 0, 0);
+            draw_box(r, v3(v->pos.x - 0.8f + 0.8f * t, v->pos.y + (v->type == 2 ? 2.45f : 1.75f), v->pos.z), v3(1.6f * t, 0.09f, 0.09f), hc, 5, 0, 1.0f);
         }
     }
 }
@@ -2755,6 +4357,7 @@ void game_render_world(Game* g, Renderer* r, Camera* cam) {
     (void)cam;
     renderer_draw_world_static(r, g->world);
     fx_begin(r);
+    game_render_nature(g, r);
     game_render_players(g, r);
     game_render_objectives(g, r);
     game_render_projectiles(g, r);
@@ -2772,9 +4375,10 @@ void game_sort_scores(Game* g, ScoreEntry* out, int* n) {
     int len = 0;
     for (int i = 0; i < g->num_players; i++) {
         Player* p = &g->players[i];
-        if (!p->active) continue;
+        if (!p->active || p->zombie) continue;
         ScoreEntry* e = &out[len++];
         e->frags = p->frags; e->deaths = p->deaths;
+        e->assists = p->assists; e->points = p->score_points; e->rank = p->rank;
         str_copy(e->name, p->name, sizeof(e->name));
         e->color = p->color;
         e->bot = p->bot;

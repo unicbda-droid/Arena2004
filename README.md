@@ -6,10 +6,13 @@ externen Spiel-Assets: Map, Texturen, Meshes, Sounds und Musik werden prozedural
 
 Enthalten sind:
 
-* **9 Spielmodi**: Deathmatch, Team Deathmatch, CTF, Vehicle-CTF, Assault,
-  Onslaught, Conquest (Battlefield-Stil), RPG und Battle Royale
+* **10 Spielmodi**: Deathmatch, Team Deathmatch, CTF, Vehicle-CTF, Assault,
+  Onslaught, Conquest (Battlefield-Stil), RPG, Battle Royale und
+  **Zombie-Invasion** (Unreal Invasion / Back4Blood-Stil)
 * **Match-Größen von 5v5 bis 30.000 Spieler** – große Populationen laufen als
   PlanetSide-artige Zonen mit Metin2-artigen Channels
+* **Zombie-Invasion** mit bis zu 1000 Gegnern, Wellen-Director, vier
+  Zombie-Typen und kooperativem Überlebenskampf
 * **Fahrzeuge, Flaggen, Control Nodes und zerstörbare Ziele**
 * **5 UT-typische Waffen** mit Primär- und Sekundärfeuer
 * **Bewegung wie in UT**: Dodge, Double Jump, Sprungfelder, Air Control
@@ -17,6 +20,12 @@ Enthalten sind:
   `DM-Rankin` (kompakte Symmetrie-Arena mit zentraler Plattform)
 * **UE3-artiger Level-Editor** mit Content-Browser, Details-Panel, Gizmos,
   Grid/Snap, Undo/Redo, Map-Speichern und **Play-in-Editor (PIE)**
+* **Lebendige Welt**: prozedurale Baeume, Buesche, Felsen, Voegel, Woelfe,
+  Baeren, Schlangen, Fuechse und bis zu **1000 Ambient-NPCs** (GTA-Stil)
+* **Belohnungen, Karriere und Item-Shop**: Credits, Match-Punkte, 10 Raenge,
+  sieben permanente Druid-/RPG-Upgrades und ein industrielles Armory-Menue
+* **Sieges- und Niederlage-Sequenzen** mit Rangliste, Ausbeute-Ledger und
+  Karriere-Fortschritt nach jedem Match
 * **Bots mit hybrider Navigation**: automatischer Nav-Graph aus der Map plus
   optionale Unreal-artige `NavPoint`-Hinweise; A*, String-Pulling, Jump-Pads
 * **Online-Spiel**: direkte LAN-Verbindung per IP oder NAT-freundlich über
@@ -85,8 +94,8 @@ Push Linux-, macOS- und Windows-Artefakte. Ein Tag startet zusätzlich einen
 Release-Job, der die drei ZIPs automatisch an das GitHub-Release anhängt:
 
 ```bash
-git tag v0.9.1
-git push origin v0.9.1
+git tag v0.9.2
+git push origin v0.9.2
 ```
 
 Dieselben Pakete dienen als Steam-Depot-Inhalt (`steam/README.md`).
@@ -153,15 +162,39 @@ Auswahl wird sofort geladen und gilt für Demo-Match, Online-Spiel und Editor.
 | `CONQUEST` | Conquest (Battlefield) | 5 Capture Points halten, Tickets abbauen |
 | `RPG` | RPG | Level/XP, höhere HP und Schaden pro Level |
 | `BR` | Battle Royale | Fortnite/H1Z1-artige shrinking Zone, letzter Überlebender gewinnt |
+| `INVASION` | Zombie-Invasion | 12 Wellen Zombies ueberleben; Wellen werden immer groesser |
 
 Modus im Menü über **MODE `<` / `>`** wählen oder per Konsole/CLI:
 
 ```bash
 ./arena2004 --demo --mode ctf
+./arena2004 --demo --mode invasion
 ./arena2004 --host --mode conquest --scale 64v64
 ```
 
-Konsole: `mode ctf`, `objectives`, `score`, `vehicle red`, `team red`.
+Konsole: `mode ctf`, `mode invasion`, `objectives`, `score`, `vehicle red`,
+`team red`.
+
+### Zombie-Invasion
+
+`mode invasion` startet den Koop-Modus: Spieler und Bots verteidigen sich gegen
+12 Wellen. Die Wellen werden mit jeder Runde groesser und bestehen aus
+**Walkern**, schnellen **Runnern**, gepanzerten **Brutes** und **Spittern**
+(Saeuregeschosse). Lokal/offline sind bis zu **1000 Zombies** gleichzeitig
+aktiv; im Netzwerk begrenzt das aktuelle Snapshot-Budget die Gesamtzahl auf 32
+Einheiten. Nur der Host (oder der Offline-Spieler) fuehrt Wellen-Director und
+Zombie-KI aus, Clients spiegeln die Zustaende.
+
+```text
+invasion            # Status: Welle, Hostiles, Survivors, Kills
+invasion start      # Invasion starten
+horde 250           # sofort 250 Zombies spawnen (max. 1000)
+wave                # naechste Welle erzwingen
+```
+
+Zombies teilen sich Bewegung, Kollision, Rendering-LOD, Raycast-Treffer und
+Bot-Infrastruktur mit normalen Spielern. Freundfeuer zwischen Ueberlebenden ist
+deaktiviert, Zombies koennen sich nicht gegenseitig verletzen.
 
 ### Fahrzeuge
 
@@ -169,6 +202,77 @@ In `VCTF` und auf Wunsch per `vehicle [team]` stehen drei Fahrzeugtypen bereit:
 **Scorpion** (schnell, leicht), **Manta** (wendig, Flug) und **Goliath** (schwer,
 viel HP). Mit `E` steigt man in der Nähe ein und wieder aus; Fahrzeuge schießen
 mit Primärfeuer und haben eigene HP.
+
+---
+
+## Natur und lebendige Welt
+
+Damit sich die Arena nicht tot oder deprimierend anfuehlt, generiert jede Map
+beim Laden eine komplette Naturschicht:
+
+* **Baeume**: Nadel-, Laub- und Totholz-Baeume, Buesche und Felsen mit
+  Wind-Schwanken und Entfernungs-Culling.
+* **Tiere**: Woelfe, Baeren, Schlangen und Fuechse streifen umher, Voegel
+  kreisen ueber der Arena. Alle Tiere sind dekorativ und kaempfen nicht.
+* **Ambient-NPCs**: bis zu **1000** leichtgewichtige Zivilisten laufen mit
+  einfacher Wander-KI durch die Welt (GTA-6-Stil). Gerendert wird immer nur
+  das naechste Budget, damit die Framerate stabil bleibt.
+
+```text
+ambient             # aktuelle Population + Baeume/Tiere anzeigen
+ambient 1000        # 1000 Ambient-NPCs aktivieren
+ambient 120         # Standard-Population
+ambient off         # Natur und Tiere ausblenden
+ambient on
+```
+
+Die Natur ist rein dekorativ (keine Kollision) und kostet im Selftest bei 1000
+NPCs nur wenige Millisekunden pro Frame.
+
+---
+
+## RPG, Armory, Belohnungen und Karriere
+
+Kills, Assists, Zombie-Kills und der Match-Ausgang zahlen auf ein persistentes
+Profil ein:
+
+* **Credits** kaufen permanente Upgrades im **ARMORY & CAREER**-Menue oder per
+  Konsole.
+* **Match-Punkte** bestimmen die Rangliste und die Ausbeute am Match-Ende.
+* **Karriere-Punkte** ergeben einen von **10 Raengen**:
+  `RECRUIT`, `PRIVATE`, `CORPORAL`, `SERGEANT`, `LIEUTENANT`, `CAPTAIN`,
+  `MAJOR`, `COLONEL`, `COMMANDER`, `GENERAL`.
+* Das Profil liegt in `$HOME/.arena2004_profile` und wird beim Match-Ende,
+  beim Verlassen des Matches und beim Beenden gespeichert.
+
+Sieben Upgrades im Druid-/Unreal-RPG-Stil:
+
+| Key | Upgrade | Wirkung pro Stufe |
+|---|---|---|
+| `damage` | DAMAGE CORE | +10 % Waffenschaden |
+| `firerate` | OVERCLOCK | +7 % Feuerrate |
+| `health` | BIO WEAVE | +25 max. HP |
+| `ammo` | AMMO BELT | +15 % Munitionskapazitaet |
+| `vamp` | VAMPIRIC RUNE | 2 % Lebensraub pro Treffer |
+| `speed` | SERVO LEGS | +5 % Laufgeschwindigkeit |
+| `armor` | ARMOR PLATING | -3,5 % erlittener Schaden (max. 30 %) |
+
+```text
+shop                        # Armory mit Kosten und Rang anzeigen
+upgrade damage              # naechste Stufe kaufen
+credits                     # Kontostand
+rank                        # Karriere, Kills, Assists, XP
+results                     # Nachkampf-Auswertung
+```
+
+### Sieges- und Niederlage-Sequenz
+
+Am Match-Ende faehrt der HUD eine gestaffelte Sequenz: zuerst die zentrale
+**VICTORY**- bzw. **DEFEAT**-/`OVERRUN`-Anzeige mit Hazard-Streifen und
+Rost-Optik, danach die Top-5-Rangliste mit Punkten und Kills sowie das
+Ausbeute-Ledger (Punkte, Credits, Kills, Assists, Karriere, Rang und
+Invasion-Statistik). `TAB` zeigt jederzeit das erweiterte Scoreboard mit
+Punkte-Spalte.
 
 ---
 
@@ -329,8 +433,10 @@ in Gothic/Quake/RTCW:
 
 * Autovervollständigung mit `Tab`, History mit `↑`/`↓`, Scrollback mit `Bild↑`/`Bild↓`
 * Befehle und Variablen: `help`, `status`, `mode`, `scale`, `mega`, `zones`,
-  `channels`, `objectives`, `score`, `vehicle`, `addbot`, `removebot`, `map`,
-  `save`, `load`, `trigger`, `password`, `netgraph`, `set <var> <wert>`
+  `channels`, `objectives`, `score`, `vehicle`, `invasion`, `horde`, `wave`,
+  `shop`, `upgrade`, `credits`, `rank`, `results`, `ambient`, `addbot`,
+  `removebot`, `map`, `save`, `load`, `trigger`, `password`, `netgraph`,
+  `set <var> <wert>`
 * **OpenCode starten**: `opencode` öffnet OpenCode im Projektordner, optional
   mit Aufgabe (`opencode fix the bot pathing`). Damit lässt sich das Spiel
   direkt aus der Konsole heraus erweitern.
@@ -351,7 +457,7 @@ in Gothic/Quake/RTCW:
 --lobby HOST[:PORT]    Lobby/NAT-Relay verwenden
 --code CODE            Raumcode zum Beitreten
 --room NAME            Raumname beim Hosten
---mode NAME            dm|tdm|ctf|vctf|assault|onslaught|conquest|rpg|br
+--mode NAME            dm|tdm|ctf|vctf|assault|onslaught|conquest|rpg|br|invasion
 --scale N|5v5|32v32    Matchgröße (bis 30000 Spieler/Zonen)
 --password PW          Host-Passwort / Zugangskontrolle
 --joinpassword PW      Passwort beim Beitreten
@@ -390,12 +496,13 @@ src/gl_util.*     Shader, Meshes, FBOs, prozedurale Texturen, PNG-Export
 src/ui.*          Immediate-Mode-UI, Font-Atlas, Widgets, Theme
 src/world.*       Actor-/Map-Modell, Kollision, Raycast, DM-Deck17, Speichern/Laden
 src/render.*      Szenen-Renderer, Skybox, Licht, Bloom, FX, Debug-Lines
-src/game.*        Spielmodi, Teams, Objectives, Fahrzeuge, BR/RPG, Zonen/Channels
+src/game.*        Spielmodi, Teams, Objectives, Fahrzeuge, BR/RPG, Invasion,
+                  Natur/Ambient-NPCs, Zonen/Channels
 src/hud.*         HUD, Crosshair, Killfeed, Scoreboard, Netgraph, Overlays
 src/audio.*       prozedurale SFX und Musikschleifen (SDL2_mixer)
 src/editor.*      UE3-artiger Editor inkl. PIE
 src/net.*         UDP-Client/Host, Snapshots, Passwort-Handshake, Relay-Anbindung
-src/netproto.h    Wire-Protokoll (NET_VERSION, PKT_MAX_PLAYERS = 8)
+src/netproto.h    Wire-Protokoll (NET_VERSION 7, PKT_MAX_PLAYERS = 32)
 src/lobby.c       eigenständiger Lobby-/NAT-Relay-Server
 src/platform.h    portabler Socket-/Sleep-/Dateisystem-Layer
 src/steam_bridge.* optionaler Steamworks-Loader (DLOPEN/LoadLibrary)
@@ -426,7 +533,13 @@ tests/bot_test.sh  Bot-/Simulationsmatrix inkl. 1k-BR
   Zonen/Channels mit LOD-KI. Nur die aktive Zone wird vollständig simuliert.
 * Battle Royale: Fortnite/H1Z1-artige Zone mit 6 Schrumpfstufen und
   Schadens-Ticks außerhalb des Kreises; Bots fliehen aktiv ins Zentrum
-* RPG: XP/Level pro Session, höhere Max-HP und Schadensmultiplikatoren
+* RPG: XP/Level pro Session, höhere Max-HP und Schadensmultiplikatoren;
+  permanente Armory-Upgrades (Damage, Fire Rate, HP, Ammo, Vampirismus,
+  Speed, Armor) mit Credits, Karriere-Raengen und persistentem Profil
+* Invasion: bis zu 1000 Zombies lokal, Wellen-Director, vier Typen,
+  host-autoritative Spiegelung im Netzwerk
+* Natur: prozedurale Baeume/Tiere plus bis zu 1000 Ambient-NPCs mit
+  Entfernungs-Culling und einem festen Render-Budget
 * Netzwerk: eigenes UDP-Protokoll (`src/netproto.h`) mit Sequenznummern,
   Snapshots (20 Hz), Client-Inputs (30 Hz), Ping/Pong, Passwort-Handshake und
   Timeouts. Bis zu 32 Spieler pro Listen-Server; Snapshots werden gechunkt.
@@ -440,7 +553,7 @@ tests/bot_test.sh  Bot-/Simulationsmatrix inkl. 1k-BR
 
 ```bash
 make -j$(nproc)
-./arena2004 --selftest                 # PASS (inkl. aller 9 Modi, 256/30000-Scale)
+./arena2004 --selftest                 # PASS (10 Modi, Invasion, RPG, Natur, 256/30000-Scale)
 ./arena2004 --bottest 12               # PASS (Bots bewegen sich, A* findet Pfade)
 tests/net_test.sh                      # PASS (Lobby, Raumcode, Passwort, Modus)
 tests/listen_test.sh                   # PASS (21 Spieler, gechunkte Snapshots)
@@ -452,7 +565,9 @@ tests/bot_test.sh                      # PASS (alle Modi, 1k-BR, 30k-Zone)
 ```
 
 Der Selftest prüft Menü-, Spiel-, Editor- und PIE-Rendering (inkl. PNG-Export),
-Map-Speichern/-Laden, Netzwerk-Socket, Audio sowie alle Spielmodi und die
+Map-Speichern/-Laden, Netzwerk-Socket, Audio sowie alle Spielmodi, den
+1000-Zombie-Horden-Test, die sieben RPG-Upgrades inkl. Match-Auszahlung und
+Rangaufstieg, die Naturschicht mit 1000 Ambient-NPCs und die
 Zonen-/Channel-Konfiguration bis 30.000 Spieler. Der Netzwerktest startet den
 Lobby-Server, registriert einen Host mit Raumcode, testet falsche und richtige
 Passwörter und verbindet einen Client über den Relay. `listen_test.sh` prüft
@@ -466,7 +581,7 @@ Zusätzlich wurde der Selftest unter AddressSanitizer/UBSan ausgeführt.
 Das Projekt ist so vorbereitet, dass derselbe Quellcode auf GitHub und Steam
 veröffentlicht werden kann:
 
-* **GitHub**: Repository anlegen, `git push`, Tag `v0.9.1` setzen – der Workflow
+* **GitHub**: Repository anlegen, `git push`, Tag `v0.9.2` setzen – der Workflow
   baut Linux/macOS/Windows-ZIPs als Artefakte.
 * **Steam**: AppID/DepotIDs in `steam/*.vdf` eintragen, `scripts/package.sh`
   ausführen, dann `STEAM_USER=... scripts/steam_upload.sh`. Details stehen in
@@ -481,7 +596,9 @@ Die Netzwerk-Synchronisation ist bewusst einfach (Host-autoritative Snapshots
 mit lokaler Prädiktion) und auf 32 Spieler pro Listen-Server ausgelegt.
 1.000 Spieler laufen lokal vollständig; Populationen darüber sind statistische
 Zonen/Channels, keine echte 1:1-Simulation jedes Spielers. Für echte
-1000er-Netzwerkrunden wäre Server-Meshing/Sharding der nächste Schritt. Steamworks-Features (Achievements, Cloud, Lobby) sind vorbereitet,
-aber ohne SDK nicht aktiv.
+1000er-Netzwerkrunden wäre Server-Meshing/Sharding der nächste Schritt.
+Die Natur- und Ambient-NPC-Schicht ist dekorativ und nicht Teil der
+Netzwerk-Snapshots. Steamworks-Features (Achievements, Cloud, Lobby) sind
+vorbereitet, aber ohne SDK nicht aktiv.
 
 Viel Spaß in der Arena!
