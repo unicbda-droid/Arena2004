@@ -23,6 +23,9 @@
 #define MAX_TREES 260
 #define MAX_CRITTERS 64
 #define MAX_AMBIENT 1000
+#define MAX_BUILDS 96
+#define BUILD_MATS 3
+#define MAX_LIFE_POINTS 12
 
 /* UT2004 / Battlefield / PlanetSide inspired match types. */
 typedef enum {
@@ -36,6 +39,7 @@ typedef enum {
     GM_RPG,             /* persistent style leveling          */
     GM_BATTLE_ROYALE,   /* shrinking zone, last one standing  */
     GM_INVASION,        /* zombie waves (Back4Blood / Unreal Invasion) */
+    GM_ALTIS,           /* Arma 3 Altis Life style roleplay / jobs    */
     GM_COUNT
 } GameMode;
 
@@ -72,7 +76,7 @@ extern WeaponDef weapon_defs[WPN_COUNT];
 typedef struct {
     float move_x, move_z;   /* -1..1 local */
     float yaw, pitch;
-    bool jump, crouch, fire, alt_fire, dodge, use;
+    bool jump, crouch, fire, alt_fire, dodge, use, reload;
     int switch_weapon;      /* -1 none, else weapon id */
 } PlayerInput;
 
@@ -86,9 +90,13 @@ typedef struct {
     float respawn_timer, protection;
     int frags, deaths, spree;
     int weapon;
-    int ammo[WPN_COUNT];
+    int ammo[WPN_COUNT];    /* total rounds left (magazine + reserve) */
+    int mag[WPN_COUNT];     /* rounds currently loaded               */
     bool has[WPN_COUNT];
     float fire_timer, alt_timer, switch_timer;
+    float reload_timer;     /* > 0 while reloading                    */
+    float reload_total;     /* full duration of the current reload    */
+    int reload_weapon;      /* weapon being reloaded, -1 when idle    */
     float dodge_timer, dodge_cooldown;
     float tap_timer[4];
     int last_tap[4];
@@ -96,6 +104,8 @@ typedef struct {
     bool jump_latch, fire_latch, alt_latch;
     bool crouch;
     bool grounded;
+    bool hit_wall_last_frame;
+    bool stuck_last_frame;
     float phase, bob, land_kick, recoil, shake;
     float damage_flash;
     Vec3 damage_dir;
@@ -130,6 +140,26 @@ typedef struct {
     int vehicle;           /* vehicle index or -1 */
     bool in_vehicle;
     float use_latch;
+    /* Fortnite-style building */
+    int mats[BUILD_MATS];  /* wood, stone, metal */
+    bool build_mode;
+    int build_sel;         /* 0 wall, 1 floor, 2 ramp */
+    int build_mat;         /* 0 wood, 1 stone, 2 metal */
+    float build_yaw;       /* radians, snapped to 90 degree steps */
+    float build_cd;
+    float harvest_cd;
+    int harvest_target;
+    /* Altis Life roleplay layer */
+    int cash, bank;        /* wallet / bank account */
+    int wanted;            /* 0..5 stars */
+    int ore;               /* mined material waiting to be sold */
+    int life_job;          /* 0 none, 1 delivery */
+    int life_stage;
+    float life_cd;
+    bool life_use_latch;
+    float life_msg_t;
+    char life_msg[96];
+    Vec3 life_target;
     int bot_vehicle_target; /* vehicle index a bot wants to board, -1 none */
     float bot_vehicle_t;    /* cooldown before looking for another vehicle */
     /* Invasion zombies reuse the player capsule/movement/AI budget. This
@@ -286,8 +316,8 @@ typedef struct {
 /* Procedural nature layer: purely decorative, no collision cost. */
 typedef struct {
     Vec3 pos;
-    float height, radius, phase, sway;
-    int kind;        /* 0 pine, 1 broadleaf, 2 dead tree, 3 bush, 4 rock */
+    float height, radius, phase, sway, hp;
+    int kind;        /* 0 pine, 1 broadleaf, 2 dead tree, 3 bush, 4 rock, 5 metal scrap */
     int active;
 } NatureProp;
 
@@ -307,6 +337,30 @@ typedef struct {
     int palette;
     int active;
 } AmbientNpc;
+
+/* Fortnite-style player-built structures. Each piece owns one ACT_BRUSH actor
+ * appended to the World so collision, raycasts and rendering stay unified. */
+typedef struct {
+    bool active;
+    int actor;             /* index into Game.world->actors */
+    int type;              /* 0 wall, 1 floor, 2 ramp */
+    int material;          /* 0 wood, 1 stone, 2 metal */
+    int owner;
+    float hp, max_hp;
+    float build_t;         /* placement animation timer */
+    float damage_flash;
+    Vec3 pos, size;
+    float yaw;             /* degrees, matches Actor::yaw */
+} BuildPiece;
+
+/* Altis Life points of interest. */
+enum { LIFE_JOB=0, LIFE_DELIVERY, LIFE_MINE, LIFE_SHOP, LIFE_ATM, LIFE_HOSPITAL, LIFE_TYPE_COUNT };
+typedef struct {
+    int type;
+    Vec3 pos;
+    float radius;
+    char name[40];
+} LifePoint;
 
 typedef struct Game {
     World* world;
@@ -378,6 +432,14 @@ typedef struct Game {
     float zone_radius, zone_target, zone_center_x, zone_center_z, zone_timer;
     int zone_stage, br_alive, br_total;
     float br_tick;
+    /* Fortnite-style building */
+    BuildPiece builds[MAX_BUILDS];
+    int build_count;
+    /* Altis Life */
+    LifePoint life_points[MAX_LIFE_POINTS];
+    int life_point_count;
+    int life_near;
+    float life_tick;
     /* zombie invasion (Back4Blood / Unreal Invasion) */
     int invasion_wave, invasion_wave_max;
     int invasion_spawn_left;      /* zombies still queued for this wave */
@@ -456,6 +518,7 @@ bool game_upgrade_buy(Game* g, Player* p, int id);
 float game_player_max_health(Player* p);
 float game_player_max_armor(Player* p);
 int game_player_ammo_max(Player* p, int wi);
+int game_player_mag_cap(int wi);
 float game_player_speed_mult(Player* p);
 float game_player_fire_mult(Player* p);
 float game_player_damage_mult(Player* p);
@@ -494,6 +557,31 @@ void game_render_pickups(Game* g, Renderer* r);
 void game_render_projectiles(Game* g, Renderer* r);
 void game_render_particles(Game* g, Renderer* r);
 void game_update_camera_shake(Game* g, float dt);
+
+/* Fortnite-style building */
+void game_build_toggle(Player* p);
+void game_build_select(Player* p, int piece);
+void game_build_material(Player* p, int dir);
+void game_build_rotate(Player* p);
+bool game_build_preview(Game* g, Player* p, Vec3* pos, Vec3* size, float* yaw, int* shape, bool* valid);
+bool game_build_attempt(Game* g, Player* p);
+void game_build_damage(Game* g, int piece, float dmg, int attacker, Vec3 point);
+void game_build_clear(Game* g);
+int game_build_index_for_actor(Game* g, int actor);
+void game_build_update(Game* g, float dt);
+void game_render_builds(Game* g, Renderer* r);
+void game_render_zone(Game* g, Renderer* r);
+bool game_harvest(Game* g, Player* p);
+const char* game_build_material_name(int mat);
+const char* game_build_piece_name(int type);
+
+/* Altis Life roleplay */
+void game_life_setup(Game* g);
+void game_life_update(Game* g, float dt);
+bool game_life_interact(Game* g, Player* p);
+void game_render_life(Game* g, Renderer* r);
+int game_life_nearest(Game* g, Player* p, float maxdist);
+const char* game_life_point_name(int type);
 
 /* scoring */
 void game_sort_scores(Game* g, ScoreEntry* out, int* n);

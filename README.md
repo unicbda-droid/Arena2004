@@ -1,14 +1,23 @@
-# Arena2004
+# AFortnite Battle Royale (Arena2004)
 
 Ein schneller Arena-Shooter im Stil von **Unreal Tournament 2004** – komplett neu
 implementiert mit **C11, SDL2 und OpenGL 3.3 Core**. Kein Unreal-Engine-Code, keine
 externen Spiel-Assets: Map, Texturen, Meshes, Sounds und Musik werden prozedural erzeugt.
 
+AFortnite verbindet drei Ideen in einer Engine:
+
+* **AFortnite Battle Royale** – shrinking Zone, letzter Überlebender gewinnt.
+* **Fortnite-Bauen** – Wände, Böden und Rampen aus Holz, Stein und Metall,
+  mitten im Kampf mit `B`, `1`/`2`/`3`, Mausrad, `R` und Feuer.
+* **Altis Life RPG** – Arma-3-Roleplay mit Jobs, Bergbau, Shop, ATM, Krankenhaus,
+  Wanted-Level und zivilen Fahrzeugen.
+
 Enthalten sind:
 
-* **10 Spielmodi**: Deathmatch, Team Deathmatch, CTF, Vehicle-CTF, Assault,
-  Onslaught, Conquest (Battlefield-Stil), RPG, Battle Royale und
-  **Zombie-Invasion** (Unreal Invasion / Back4Blood-Stil)
+* **11 Spielmodi**: Deathmatch, Team Deathmatch, CTF, Vehicle-CTF, Assault,
+  Onslaught, Conquest (Battlefield-Stil), RPG, Battle Royale,
+  **Zombie-Invasion** (Unreal Invasion / Back4Blood-Stil) und
+  **Altis Life** (Arma-3-Roleplay)
 * **Match-Größen von 5v5 bis 30.000 Spieler** – große Populationen laufen als
   PlanetSide-artige Zonen mit Metin2-artigen Channels
 * **Zombie-Invasion** mit bis zu 1000 Gegnern, Wellen-Director, vier
@@ -39,6 +48,9 @@ Enthalten sind:
 
 ![Menü](shots/selftest_menu.png)
 ![Gameplay](shots/selftest_game.png)
+![Battle Royale](shots/selftest_br.png)
+![Baumodus](shots/selftest_build.png)
+![Altis Life](shots/selftest_altis.png)
 ![Editor](shots/selftest_editor.png)
 ![DM-Rankin](shots/rankin.png)
 
@@ -125,6 +137,14 @@ Getestet mit SDL2 2.32, GLEW 2.3, OpenGL 3.3/4.6 auf Linux/X11.
 | `Shift` | Dodge (Richtung + Shift) |
 | `Strg` | Ducken |
 | `1`–`5` / Mausrad | Waffe wechseln |
+| `B` | Baumodus an/aus (Fortnite) |
+| `1` / `2` / `3` (Baumodus) | Wand / Boden / Rampe |
+| Mausrad (Baumodus) | Holz / Stein / Metall |
+| `R` (Baumodus) | Bauteil drehen |
+| Feuer (Baumodus) | Bauteil platzieren |
+| `E` | Benutzen / Altis-POI / Natur ernten |
+| `R` | Nachladen |
+| `Enter` | Respawn / Unstuck |
 | `Tab` | Scoreboard |
 | `Esc` | Pause |
 | `F5` | Match neu starten |
@@ -163,6 +183,7 @@ Auswahl wird sofort geladen und gilt für Demo-Match, Online-Spiel und Editor.
 | `RPG` | RPG | Level/XP, höhere HP und Schaden pro Level |
 | `BR` | Battle Royale | Fortnite/H1Z1-artige shrinking Zone, letzter Überlebender gewinnt |
 | `INVASION` | Zombie-Invasion | 12 Wellen Zombies ueberleben; Wellen werden immer groesser |
+| `ALTIS` | Altis Life (Arma 3) | Jobs, Bergbau, Handel, ATM, Krankenhaus, Wanted-Level |
 
 Modus im Menü über **MODE `<` / `>`** wählen oder per Konsole/CLI:
 
@@ -174,6 +195,58 @@ Modus im Menü über **MODE `<` / `>`** wählen oder per Konsole/CLI:
 
 Konsole: `mode ctf`, `mode invasion`, `objectives`, `score`, `vehicle red`,
 `team red`.
+
+### AFortnite: Bauen wie in Fortnite
+
+Mit `B` wechselt der lokale Spieler in den Baumodus. `1`, `2` und `3` wählen
+**Wand**, **Boden** oder **Rampe**; das Mausrad wechselt zwischen **Holz**,
+**Stein** und **Metall**. `R` dreht das Bauteil, Feuer platziert es, `B` schaltet
+den Modus wieder aus.
+
+* Jedes Bauteil kostet **10** Material der gewählten Sorte.
+* Holz hat 90 HP, Stein 160 HP, Metall 240 HP.
+* Startholz: **60** (außer im Altis-Life-Modus) – die erste Wand ist sofort möglich.
+* **E** erntet Holz aus Bäumen/Büschen, Stein aus Felsen und Metall aus Schrott.
+* Eliminierungen geben **+25 Holz, +15 Stein, +10 Metall**.
+* Explosionen beschädigen Spielerbauten; zerstörte Teile verschwinden sauber.
+* Vorschau ist grün (platzierbar) oder rot (blockiert). Bauten können keine
+  anderen Spieler einkesseln und nicht in solide Geometrie ragen.
+
+Konsole:
+
+```text
+build                 # Material, Bauteil und Modus anzeigen
+build give 200        # 200 Material je Sorte
+build toggle          # Baumodus umschalten
+build clear           # alle Spielerbauten entfernen
+```
+
+### Altis Life (Arma 3 Roleplay)
+
+`mode altis` startet die Roleplay-Karte mit zehn Orten in Altis-Towns:
+**Kavala**, **Athira**, **Pyrgos**, **Sofia** und **Neochori**. Bots werden zu
+passiven Zivilisten, es gibt kein Deathmatch-Ziel.
+
+* **JOB CENTER** – Lieferauftrag annehmen.
+* **DELIVERY DEPOT** – Fracht abliefern, 260–440 $ verdienen.
+* **PYRGOS MINE** – Erz abbauen (E).
+* **24/7 SHOP** – Erz verkaufen oder Baumaterial kaufen.
+* **BANK ATM** – Bargeld einzahlen/abheben (Überleben schützt vor Verlust).
+* **HOSPITAL** – heilen, Wanted-Level gegen Strafe bereinigen, Respawn nach Tod.
+* **Wanted-Level** steigt bei Kills; bei Tod verliert man Bargeld, Erz und Job.
+* Zivile Fahrzeuge stehen in den Towns bereit (`E` zum Ein-/Aussteigen).
+
+Konsole:
+
+```text
+life                  # Kontostand, Erz, Wanted und alle POIs
+life add 1000         # Bargeld
+life bank 1000        # Bankguthaben
+life mine 20          # Erz
+life wanted 3         # Wanted-Level setzen
+```
+
+Bargeld, Bank und Erz werden im Profil gespeichert.
 
 ### Zombie-Invasion
 

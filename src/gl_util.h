@@ -49,8 +49,13 @@ GLuint texture_create_rgba(int w, int h, const unsigned char* pixels, bool repea
 GLuint texture_create_float(int w, int h, const float* pixels, bool repeat, bool mipmap);
 void texture_free(GLuint* t);
 
+/* anisotropic filtering: call once after the GL context exists (lazy-safe) */
+void texture_aniso_init(void);
+float texture_aniso_max(void);
+
 /* procedural texture atlases */
 GLuint make_world_atlas(void);
+GLuint make_normal_atlas(void);
 GLuint make_ui_atlas(int* white_x, int* white_y, int* glow_x, int* glow_y, int* ring_x, int* ring_y);
 bool save_png(const char* path, int w, int h, const unsigned char* rgba);
 

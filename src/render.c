@@ -26,6 +26,8 @@ static const char* SCENE_FS =
 "#version 330 core\n"
 "in vec3 vWorld; in vec3 vN; in vec2 vUV; out vec4 frag;\n"
 "uniform sampler2D uTex;\n"
+"uniform sampler2D uNormalTex;\n"
+"uniform float uNormalStrength;\n"
 "uniform vec3 uColor;\n"
 "uniform vec2 uTile;\n"
 "uniform float uUVScale;\n"
@@ -43,11 +45,28 @@ static const char* SCENE_FS =
 "uniform float uFogDensity;\n"
 "void main(){\n"
 "  vec3 N=normalize(vN);\n"
-"  vec2 uv;\n"
+"  /* UVs are tiled 4x4 inside the atlas. Keep a smooth coordinate for the\n"
+"   * tangent basis; fract() alone produces huge derivatives at tile seams. */\n"
+"  vec2 uvs;\n"
 "  if(uWorldUV==1){\n"
 "    vec2 p = abs(N.y)>0.65 ? vWorld.xz : (abs(N.x)>0.65 ? vWorld.zy : vWorld.xy);\n"
-"    uv = uTile + fract(p*uUVScale)*0.25;\n"
-"  } else { uv = uTile + fract(vUV*uUVScale)*0.25; }\n"
+"    uvs = p*uUVScale;\n"
+"  } else { uvs = vUV*uUVScale; }\n"
+"  vec2 uv = uTile + fract(uvs)*0.25;\n"
+"  /* Tangent frame from screen-space derivatives, then perturb the normal. */\n"
+"  {\n"
+"    vec2 tuv = uvs*0.25;\n"
+"    vec3 dp1=dFdx(vWorld), dp2=dFdy(vWorld);\n"
+"    vec2 duv1=dFdx(tuv), duv2=dFdy(tuv);\n"
+"    vec3 dp2perp=cross(dp2,N), dp1perp=cross(N,dp1);\n"
+"    vec3 T=dp2perp*duv1.x + dp1perp*duv2.x;\n"
+"    vec3 B=dp2perp*duv1.y + dp1perp*duv2.y;\n"
+"    float im=inversesqrt(max(max(dot(T,T),dot(B,B)),1e-12));\n"
+"    T*=im; B*=im;\n"
+"    vec3 nm=texture(uNormalTex,uv).xyz*2.0-1.0;\n"
+"    nm.xy*=uNormalStrength;\n"
+"    N=normalize(T*nm.x + B*nm.y + N*nm.z);\n"
+"  }\n"
 "  vec3 tex=texture(uTex,uv).rgb;\n"
 "  vec3 albedo=tex*uColor;\n"
 "  vec3 V=normalize(uCamPos-vWorld);\n"
@@ -199,6 +218,7 @@ bool renderer_init(Renderer* r,int w,int h){
     memset(r,0,sizeof(*r)); r->w=w; r->h=h;
     r->bloom_strength=0.55f;
     r->exposure=1.08f;
+    r->normal_strength=1.0f;
     r->prog_scene=shader_create(SCENE_VS,SCENE_FS,"scene");
     r->prog_sky=shader_create(SKY_VS,SKY_FS,"sky");
     r->prog_fx=shader_create(FX_VS,FX_FS,"fx");
@@ -208,7 +228,7 @@ bool renderer_init(Renderer* r,int w,int h){
     r->prog_composite=shader_create(FS_VS,COMP_FS,"composite");
     if(!r->prog_scene||!r->prog_sky||!r->prog_fx||!r->prog_line||!r->prog_bright||!r->prog_blur||!r->prog_composite){ fprintf(stderr,"[render] shader init failed\n"); return false; }
     r->cube=mesh_cube(); r->sphere=mesh_sphere(20,14); r->cylinder=mesh_cylinder(20,true); r->cone=mesh_cone(20); r->ramp=mesh_ramp(); r->quad=mesh_quad();
-    r->world_tex=make_world_atlas(); r->fx_tex=make_fx_texture();
+    r->world_tex=make_world_atlas(); r->normal_tex=make_normal_atlas(); r->fx_tex=make_fx_texture();
     r->hdr=fbo_create(w,h,true,true); r->bloomA=fbo_create(w/2,h/2,true,false); r->bloomB=fbo_create(w/2,h/2,true,false);
     glGenVertexArrays(1,&r->fs_vao);
     r->fx_cap=65536; r->fx_alpha_cap=32768; r->fx_verts=malloc(sizeof(FxVert)*r->fx_cap); r->fx_alpha_verts=malloc(sizeof(FxVert)*r->fx_alpha_cap);
@@ -232,7 +252,7 @@ bool renderer_init(Renderer* r,int w,int h){
 void renderer_destroy(Renderer* r){
     mesh_free(&r->cube); mesh_free(&r->sphere); mesh_free(&r->cylinder); mesh_free(&r->cone); mesh_free(&r->ramp); mesh_free(&r->quad);
     fbo_free(&r->hdr); fbo_free(&r->bloomA); fbo_free(&r->bloomB);
-    texture_free(&r->world_tex); texture_free(&r->fx_tex);
+    texture_free(&r->world_tex); texture_free(&r->normal_tex); texture_free(&r->fx_tex);
     if(r->prog_scene) glDeleteProgram(r->prog_scene);
     if(r->prog_sky) glDeleteProgram(r->prog_sky);
     if(r->prog_fx) glDeleteProgram(r->prog_fx);
@@ -263,7 +283,9 @@ void renderer_begin(Renderer* r,Camera cam,World* w,int vx,int vy,int vw,int vh,
     glClearColor(0.006f,0.008f,0.012f,1.0f); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_CULL_FACE);
     r->view=mat4_look_at(cam.pos,v3add(cam.pos,cam.fwd),v3(0,1,0));
-    r->proj=mat4_perspective(cam.fov*DEG2RAD,(float)vw/fmaxf((float)vh,1),0.03f,240.0f);
+    /* A slightly larger near plane buys a lot of depth precision at 240 m.
+     * The player collision radius keeps walls further away than this. */
+    r->proj=mat4_perspective(cam.fov*DEG2RAD,(float)vw/fmaxf((float)vh,1),0.08f,240.0f);
     r->fog=w->fog_color; r->fog_density=w->fog_density; r->ambient_sky=w->ambient_sky; r->ambient_ground=w->ambient_ground;
     r->sun_dir=w->sun_dir; r->sun_color=w->sun_color; r->sun_intensity=w->sun_intensity;
     world_collect_lights(w,cam.pos,r->lights,MAX_RENDER_LIGHTS,&r->nlights,time);
@@ -271,6 +293,8 @@ void renderer_begin(Renderer* r,Camera cam,World* w,int vx,int vy,int vw,int vh,
     glUseProgram(r->prog_scene);
     shader_uniform_mat4(r->prog_scene,"uView",r->view); shader_uniform_mat4(r->prog_scene,"uProj",r->proj);
     shader_uniform1i(r->prog_scene,"uTex",0);
+    shader_uniform1i(r->prog_scene,"uNormalTex",1);
+    shader_uniform1f(r->prog_scene,"uNormalStrength",r->normal_strength);
     shader_uniform1i(r->prog_scene,"uWorldUV",1);
     shader_uniform1i(r->prog_scene,"uViewmodel",0);
     shader_uniform_vec3(r->prog_scene,"uCamPos",cam.pos);
@@ -288,6 +312,8 @@ void renderer_begin(Renderer* r,Camera cam,World* w,int vx,int vy,int vw,int vh,
     glUniform3fv(glGetUniformLocation(r->prog_scene,"uLightColor"),16,lc);
     glUniform1fv(glGetUniformLocation(r->prog_scene,"uLightRadius"),16,lr);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,r->world_tex);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,r->normal_tex);
+    glActiveTexture(GL_TEXTURE0);
     r->in_scene=true;
 }
 void renderer_sky(Renderer* r){
@@ -313,6 +339,8 @@ void renderer_draw_model(Renderer* r,Mesh* m,Mat4 model,Color color,int material
 void renderer_draw_world_static(Renderer* r,World* w){
     glUseProgram(r->prog_scene);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,r->world_tex);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,r->normal_tex);
+    glActiveTexture(GL_TEXTURE0);
     shader_uniform1i(r->prog_scene,"uViewmodel",0);
     for(int i=0;i<w->count;i++){
         Actor* a=&w->actors[i];

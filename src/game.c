@@ -92,9 +92,9 @@ static Color team_base_color(int team) {
 static const char* MODE_NAMES[GM_COUNT] = {
     "Deathmatch", "Team Deathmatch", "Capture the Flag", "Vehicle CTF",
     "Assault", "Onslaught", "Conquest", "RPG Deathmatch", "Battle Royale",
-    "Zombie Invasion"
+    "Zombie Invasion", "Altis Life"
 };
-static const char* MODE_SHORT[GM_COUNT] = { "DM", "TDM", "CTF", "VCTF", "ASSAULT", "ONSLAUGHT", "CONQUEST", "RPG", "BR", "INVASION" };
+static const char* MODE_SHORT[GM_COUNT] = { "DM", "TDM", "CTF", "VCTF", "ASSAULT", "ONSLAUGHT", "CONQUEST", "RPG", "BR", "INVASION", "ALTIS" };
 
 const char* game_mode_name(int mode) {
     if (mode < 0 || mode >= GM_COUNT) mode = GM_DM;
@@ -121,6 +121,8 @@ int game_mode_from_name(const char* name) {
     if (!strcmp(k, "br") || !strcmp(k, "battleroyale") || !strcmp(k, "royale")) return GM_BATTLE_ROYALE;
     if (!strcmp(k, "inv") || !strcmp(k, "invasion") || !strcmp(k, "zombie") || !strcmp(k, "zombies") ||
         !strcmp(k, "survival") || !strcmp(k, "back4blood") || !strcmp(k, "horde")) return GM_INVASION;
+    if (!strcmp(k, "altis") || !strcmp(k, "altislife") || !strcmp(k, "life") || !strcmp(k, "roleplay") ||
+        !strcmp(k, "rp") || !strcmp(k, "arma")) return GM_ALTIS;
     return -1;
 }
 bool game_mode_team_based(int mode) {
@@ -196,6 +198,50 @@ int game_player_ammo_max(Player* p, int wi) {
     if (wi < 0 || wi >= WPN_COUNT) return 0;
     float mul = 1.0f + 0.15f * (float)p->upg[UPG_AMMO];
     return (int)((float)weapon_defs[wi].ammo_max * mul + 0.5f);
+}
+/* Magazine sizes keep the UT-style ammo pool but add a short reload pause.
+ * The pool is still the total ammo; mag[] is only the loaded part. */
+int game_player_mag_cap(int wi) {
+    static const int caps[WPN_COUNT] = { 30, 8, 4, 6, 8 };
+    if (wi < 0 || wi >= WPN_COUNT) return 0;
+    return caps[wi];
+}
+static float reload_time(int wi) {
+    static const float times[WPN_COUNT] = { 1.05f, 1.30f, 1.55f, 1.45f, 1.15f };
+    if (wi < 0 || wi >= WPN_COUNT) return 1.0f;
+    return times[wi];
+}
+static void reload_begin(Player* p) {
+    if (!p || !p->alive) return;
+    int wi = p->weapon;
+    if (wi < 0 || wi >= WPN_COUNT || !p->has[wi]) return;
+    if (p->reload_timer > 0.0f) return;
+    int cap = game_player_mag_cap(wi);
+    if (p->mag[wi] >= cap || p->mag[wi] >= p->ammo[wi]) return;
+    p->reload_weapon = wi;
+    p->reload_total = reload_time(wi);
+    p->reload_timer = p->reload_total;
+}
+static void reload_tick(Game* g, Player* p, float dt) {
+    if (p->reload_timer <= 0.0f) return;
+    /* Switching weapons cancels the reload instead of silently finishing it. */
+    if (p->reload_weapon < 0 || p->weapon != p->reload_weapon) {
+        p->reload_timer = 0.0f;
+        p->reload_total = 0.0f;
+        p->reload_weapon = -1;
+        return;
+    }
+    p->reload_timer -= dt;
+    if (p->reload_timer > 0.0f) return;
+    int wi = p->reload_weapon;
+    if (wi >= 0 && wi < WPN_COUNT) {
+        int cap = game_player_mag_cap(wi);
+        p->mag[wi] = p->ammo[wi] < cap ? p->ammo[wi] : cap;
+        if (p->id == g->local_player) audio_play(SFX_PICKUP_AMMO, 0.35f, 0.18f);
+    }
+    p->reload_timer = 0.0f;
+    p->reload_total = 0.0f;
+    p->reload_weapon = -1;
 }
 void game_player_refresh_stats(Player* p) {
     if (!p) return;
@@ -346,6 +392,63 @@ static int spawn_points(Game* g, Vec3* out, int cap) {
     return n;
 }
 
+/* Authored player starts can sit inside solid brushes (DM-Deck17 shipped with
+ * several starts inside pillars and corner pads), which traps the camera in
+ * geometry. Check the player capsule against every solid actor. A larger
+ * radius is used to reject cramped spots such as the pocket behind the
+ * corner rails: the capsule fits there, but it is visually a closed box. */
+static bool spawn_pos_free_r(const World* w, Vec3 feet, float radius) {
+    AABB cap = { v3(feet.x - radius, feet.y + 0.02f, feet.z - radius),
+                 v3(feet.x + radius, feet.y + 1.75f, feet.z + radius) };
+    for (int i = 0; i < w->count; i++) {
+        const Actor* a = &w->actors[i];
+        if (!world_actor_solid(a)) continue;
+        if (aabb_overlap(cap, world_actor_aabb(w, a))) return false;
+    }
+    return true;
+}
+
+static bool spawn_pos_free(const World* w, Vec3 feet) {
+    return spawn_pos_free_r(w, feet, 0.45f);
+}
+
+static bool spawn_has_floor(const World* w, Vec3 feet) {
+    Ray r;
+    r.origin = v3(feet.x, feet.y + 0.35f, feet.z);
+    r.dir = v3(0, -1, 0);
+    RayHit hit;
+    return world_raycast(w, r, 1.0f, true, &hit) && hit.normal.y > 0.35f;
+}
+
+static bool spawn_clear(const World* w, Vec3 feet, float radius) {
+    return spawn_pos_free_r(w, feet, radius) && spawn_has_floor(w, feet);
+}
+
+static Vec3 spawn_safe_pos(const World* w, Vec3 base) {
+    /* First try to keep a comfortable free ring around the spawn; if the map
+     * is tight, fall back to the player capsule radius. */
+    static const float clearances[2] = { 1.15f, 0.45f };
+    for (int pass = 0; pass < 2; pass++) {
+        float cr = clearances[pass];
+        if (spawn_clear(w, base, cr)) return base;
+        /* Search sideways first so a spawn next to a pillar stays on the deck
+         * instead of being pushed on top of it. */
+        for (int ring = 1; ring <= 12; ring++) {
+            float radius = (float)ring * 0.4f;
+            for (int k = 0; k < 12; k++) {
+                float ang = (float)k * (2.0f * PI / 12.0f);
+                Vec3 p = v3(base.x + cosf(ang) * radius, base.y, base.z + sinf(ang) * radius);
+                if (spawn_clear(w, p, cr)) return p;
+            }
+        }
+    }
+    for (float lift = 0.5f; lift <= 4.0f; lift += 0.5f) {
+        Vec3 p = v3(base.x, base.y + lift, base.z);
+        if (spawn_pos_free(w, p)) return p;
+    }
+    return v3(base.x, base.y + 0.5f, base.z);
+}
+
 static void find_bases(Game* g, Vec3* a, Vec3* b) {
     Vec3 pts[128];
     int n = spawn_points(g, pts, 128);
@@ -393,6 +496,7 @@ void game_set_mode(Game* g, int mode) {
     case GM_RPG: g->score_limit = (float)(g->frag_limit > 0 ? g->frag_limit : 50); break;
     case GM_BATTLE_ROYALE: g->score_limit = 0.0f; break;
     case GM_INVASION: g->score_limit = 0.0f; break;
+    case GM_ALTIS: g->score_limit = 0.0f; break;
     default: break;
     }
     assign_teams(g);
@@ -425,6 +529,8 @@ static void init_player_slot(Game* g, Player* p, int i) {
     p->weapon = WPN_AR;
     p->has[WPN_AR] = true;
     p->ammo[WPN_AR] = 60;
+    p->mag[WPN_AR] = game_player_mag_cap(WPN_AR);
+    p->reload_timer = 0; p->reload_total = 0; p->reload_weapon = -1;
     p->protection = 2.0f;
     p->bot_weapon_pref = WPN_AR;
     p->bot_aim_error = 0.02f;
@@ -707,14 +813,18 @@ void game_generate_nature(Game* g) {
             t->kind = 2;
             t->height = frandr(3.0f, 6.5f);
             t->radius = frandr(0.7f, 1.5f);
-        } else if (r < 0.965f) {
+        } else if (r < 0.945f) {
             t->kind = 3;
             t->height = frandr(0.7f, 1.8f);
             t->radius = frandr(0.9f, 2.1f);
-        } else {
+        } else if (r < 0.99f) {
             t->kind = 4;
             t->height = frandr(0.5f, 1.6f);
             t->radius = frandr(0.7f, 2.0f);
+        } else {
+            t->kind = 5;   /* rusted scrap: the metal source */
+            t->height = frandr(1.0f, 1.9f);
+            t->radius = frandr(0.8f, 1.4f);
         }
     }
 
@@ -869,6 +979,24 @@ void game_update_nature(Game* g, float dt) {
 static void nature_draw_tree(Renderer* r, NatureProp* t, float sway) {
     float h = t->height, rad = t->radius;
     float bend = sinf(t->phase + sway) * 0.05f * t->sway;
+    if (t->kind == 5) {
+        /* metal scrap: a leaning rusted plate and a couple of pipes */
+        Color rust = col(0.46f, 0.28f, 0.16f, 1);
+        Color steel = col(0.42f, 0.45f, 0.48f, 1);
+        renderer_draw_model(r, &r->cube,
+            mat4_from_trs(v3(t->pos.x, t->pos.y + h * 0.34f, t->pos.z),
+                          v3(0.35f, t->phase, 0.28f), v3(rad * 1.2f, h * 0.62f, rad * 0.18f)),
+            rust, 0, 0, 0.7f, false);
+        renderer_draw_model(r, &r->cylinder,
+            mat4_from_trs(v3(t->pos.x + rad * 0.55f, t->pos.y + h * 0.20f, t->pos.z - rad * 0.25f),
+                          v3(1.45f, t->phase, 0), v3(rad * 0.16f, h * 0.8f, rad * 0.16f)),
+            steel, 0, 0, 0.8f, false);
+        renderer_draw_model(r, &r->cube,
+            mat4_from_trs(v3(t->pos.x - rad * 0.5f, t->pos.y + h * 0.16f, t->pos.z + rad * 0.3f),
+                          v3(0, t->phase * 0.7f, -0.4f), v3(rad * 0.85f, h * 0.3f, rad * 0.7f)),
+            steel, 0, 0, 0.7f, false);
+        return;
+    }
     if (t->kind == 4) {
         Color rock = col(0.37f, 0.36f, 0.34f, 1);
         renderer_draw_model(r, &r->sphere,
@@ -993,18 +1121,662 @@ void game_render_nature(Game* g, Renderer* r) {
 }
 void game_shutdown(Game* g) { memset(g, 0, sizeof(*g)); }
 
+/* ------------------------------------------------------------------ */
+/* Fortnite-style building                                             */
+/* ------------------------------------------------------------------ */
+#define BUILD_COST 10
+#define BUILD_PIECE_MAX 3
+
+static float build_hp_for(int mat) {
+    static const float hp[BUILD_MATS] = { 90.0f, 160.0f, 240.0f };
+    if (mat < 0 || mat >= BUILD_MATS) mat = 0;
+    return hp[mat];
+}
+static Color build_color_for(int mat) {
+    static const Color c[BUILD_MATS] = {
+        { 0.54f, 0.36f, 0.19f, 1.0f },   /* wood  */
+        { 0.48f, 0.47f, 0.43f, 1.0f },   /* stone */
+        { 0.43f, 0.52f, 0.63f, 1.0f }    /* metal */
+    };
+    if (mat < 0 || mat >= BUILD_MATS) mat = 0;
+    return c[mat];
+}
+static int build_material_index(int mat) {
+    if (mat == 0) return 7;   /* rust / timber tint */
+    if (mat == 1) return 4;   /* concrete          */
+    return 0;                 /* metal panels      */
+}
+const char* game_build_material_name(int mat) {
+    static const char* n[BUILD_MATS] = { "HOLZ", "STEIN", "METALL" };
+    if (mat < 0 || mat >= BUILD_MATS) mat = 0;
+    return n[mat];
+}
+const char* game_build_piece_name(int type) {
+    static const char* n[BUILD_PIECE_MAX] = { "WAND", "BODEN", "RAMPE" };
+    if (type < 0 || type >= BUILD_PIECE_MAX) type = 0;
+    return n[type];
+}
+int game_build_index_for_actor(Game* g, int actor) {
+    if (!g || actor < 0) return -1;
+    for (int i = 0; i < MAX_BUILDS; i++) {
+        if (g->builds[i].active && g->builds[i].actor == actor) return i;
+    }
+    return -1;
+}
+void game_build_toggle(Player* p) {
+    if (!p || !p->alive || p->in_vehicle) return;
+    p->build_mode = !p->build_mode;
+    p->build_yaw = p->yaw;
+    p->build_cd = 0.12f;
+}
+void game_build_select(Player* p, int piece) {
+    if (!p) return;
+    if (piece < 0) piece = 0;
+    if (piece >= BUILD_PIECE_MAX) piece = BUILD_PIECE_MAX - 1;
+    p->build_sel = piece;
+    p->build_cd = 0.08f;
+}
+void game_build_material(Player* p, int dir) {
+    if (!p || dir == 0) return;
+    p->build_mat = (p->build_mat + (dir > 0 ? 1 : BUILD_MATS - 1)) % BUILD_MATS;
+    p->build_cd = 0.08f;
+}
+void game_build_rotate(Player* p) {
+    if (!p) return;
+    p->build_yaw += (float)PI * 0.5f;
+    while (p->build_yaw >= (float)PI * 2.0f) p->build_yaw -= (float)PI * 2.0f;
+    while (p->build_yaw < 0.0f) p->build_yaw += (float)PI * 2.0f;
+    p->build_cd = 0.08f;
+}
+static float build_snap(float v, float step) { return floorf(v / step + 0.5f) * step; }
+
+bool game_build_preview(Game* g, Player* p, Vec3* pos, Vec3* size, float* yaw, int* shape, bool* valid) {
+    if (!g || !p || !pos || !size || !yaw || !shape || !valid) return false;
+    *valid = false;
+    float snap_rad = build_snap(p->build_yaw, (float)PI * 0.5f);
+    Vec3 fwd = v3(sinf(snap_rad), 0, -cosf(snap_rad));
+    Vec3 base = p->pos;
+
+    Ray r; r.origin = player_eye(p);
+    dir_from_angles(p->yaw, p->pitch, &r.dir);
+    RayHit h;
+    bool hit = world_raycast(g->world, r, 7.5f, true, &h);
+    Vec3 target = hit ? h.point : v3add(r.origin, v3mul(r.dir, 4.0f));
+
+    int piece = p->build_sel;
+    if (piece == 0) {
+        /* Wall: If the player looks at a vertical surface, extend that surface;
+         * otherwise put a wall in front of the feet. */
+        bool on_wall = hit && fabsf(h.normal.y) < 0.45f;
+        float wyaw = snap_rad;
+        Vec3 c;
+        if (on_wall) {
+            float ny = atan2f(h.normal.x, h.normal.z);
+            wyaw = build_snap(ny, (float)PI * 0.5f);
+            c = v3add(h.point, v3(h.normal.x * 0.22f, 0, h.normal.z * 0.22f));
+        } else {
+            c = v3add(base, v3mul(fwd, 2.6f));
+        }
+        c.x = build_snap(c.x, 2.0f);
+        c.z = build_snap(c.z, 2.0f);
+        bool ok = false;
+        float gy = nature_ground_at(g->world, c.x, c.z, fmaxf(base.y, target.y) + 8.0f, &ok);
+        if (!ok) gy = base.y;
+        *pos = v3(c.x, gy + 2.02f, c.z);
+        /* Wall boxes are axis-aligned in the collision/raycast path, so bake
+         * the 90-degree orientation into the footprint instead of relying on
+         * yaw (which would render rotated but collide as a 4m slab). */
+        bool odd = fabsf(sinf(wyaw)) > 0.5f;
+        *size = odd ? v3(0.35f, 4.0f, 4.0f) : v3(4.0f, 4.0f, 0.35f);
+        *yaw = 0.0f;
+        *shape = SHAPE_BOX;
+    } else if (piece == 1) {
+        Vec3 c = target;
+        c.x = build_snap(c.x, 2.0f);
+        c.z = build_snap(c.z, 2.0f);
+        bool ok = false;
+        float gy = nature_ground_at(g->world, c.x, c.z, fmaxf(base.y, target.y) + 8.0f, &ok);
+        if (!ok || fabsf(gy - target.y) > 3.5f) gy = base.y;
+        *pos = v3(c.x, gy + 0.195f, c.z);
+        *size = v3(4.0f, 0.35f, 4.0f);
+        *yaw = snap_rad;
+        *shape = SHAPE_BOX;
+    } else {
+        Vec3 c = v3add(base, v3mul(fwd, 3.2f));
+        c.x = build_snap(c.x, 2.0f);
+        c.z = build_snap(c.z, 2.0f);
+        bool ok = false;
+        float gy = nature_ground_at(g->world, c.x, c.z, base.y + 10.0f, &ok);
+        if (!ok) gy = base.y;
+        *pos = v3(c.x, gy + 2.02f, c.z);
+        *size = v3(4.0f, 4.0f, 4.0f);
+        *yaw = snap_rad;
+        *shape = SHAPE_RAMP;
+    }
+
+    if (p->mats[p->build_mat] < BUILD_COST) return true;
+    for (int i = 0; i < MAX_BUILDS; i++) {
+        BuildPiece* b = &g->builds[i];
+        if (!b->active) continue;
+        AABB ob = aabb_center_size(b->pos, b->size);
+        AABB nb = aabb_center_size(*pos, *size);
+        ob.min = v3add(ob.min, v3s(0.06f)); ob.max = v3sub(ob.max, v3s(0.06f));
+        nb.min = v3add(nb.min, v3s(0.06f)); nb.max = v3sub(nb.max, v3s(0.06f));
+        if (aabb_overlap(ob, nb)) return true;
+    }
+    AABB nb = aabb_center_size(*pos, *size);
+    nb.min = v3add(nb.min, v3s(0.06f));
+    nb.max = v3sub(nb.max, v3s(0.06f));
+    if (world_overlap_box(g->world, nb, -1)) return true;
+    /* Never let a wall/floor spawn inside another living player: that is the
+     * classic "stuck in a box" bug. The builder may build under their own feet
+     * (floors are useful), but opponents/allies must not be entombed. */
+    for (int i = 0; i < g->num_players; i++) {
+        Player* o = &g->players[i];
+        if (o == p || !o->active || !o->alive || o->zombie) continue;
+        AABB pb = aabb_center_size(v3(o->pos.x, o->pos.y + 0.9f, o->pos.z), v3(1.0f, 1.8f, 1.0f));
+        if (aabb_overlap(nb, pb)) return true;
+    }
+    *valid = true;
+    return true;
+}
+
+bool game_build_attempt(Game* g, Player* p) {
+    if (!g || !p || !p->alive || p->in_vehicle || p->build_cd > 0.0f) return false;
+    Vec3 pos, size; float yaw; int shape; bool valid;
+    if (!game_build_preview(g, p, &pos, &size, &yaw, &shape, &valid) || !valid) {
+        p->build_cd = 0.18f;
+        return false;
+    }
+    if (p->mats[p->build_mat] < BUILD_COST) {
+        if (p->id == g->local_player) {
+            game_pickup_msg(g, "Nicht genug %s - sammle mit E", game_build_material_name(p->build_mat));
+            audio_play(SFX_UI_CLICK, 0.25f, 0.0f);
+        }
+        p->build_cd = 0.25f;
+        return false;
+    }
+    int slot = -1;
+    for (int i = 0; i < MAX_BUILDS; i++) if (!g->builds[i].active) { slot = i; break; }
+    if (slot < 0) {
+        if (p->id == g->local_player) game_pickup_msg(g, "Bau-Limit erreicht");
+        p->build_cd = 0.30f;
+        return false;
+    }
+    Actor a;
+    world_actor_defaults(&a, ACT_BRUSH, 0);
+    a.pos = pos;
+    a.size = size;
+    a.yaw = yaw * RAD2DEG;
+    a.shape = shape;
+    a.flags = FLAG_SOLID;
+    a.material = build_material_index(p->build_mat);
+    a.color = build_color_for(p->build_mat);
+    snprintf(a.name, MAX_NAME, "%s %s", game_build_piece_name(p->build_sel), game_build_material_name(p->build_mat));
+    int actor = world_add(g->world, a);
+    if (actor < 0) { p->build_cd = 0.3f; return false; }
+
+    BuildPiece* b = &g->builds[slot];
+    memset(b, 0, sizeof(*b));
+    b->active = true;
+    b->actor = actor;
+    b->type = p->build_sel;
+    b->material = p->build_mat;
+    b->owner = p->id;
+    b->max_hp = build_hp_for(p->build_mat);
+    b->hp = b->max_hp;
+    b->build_t = 0.18f;
+    b->pos = pos;
+    b->size = size;
+    b->yaw = yaw * RAD2DEG;
+    p->mats[p->build_mat] -= BUILD_COST;
+    p->build_cd = 0.14f;
+    p->fire_timer = 0.06f;
+
+    for (int i = 0; i < 10; i++) {
+        Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.2f, 1), frandr(-1, 1)));
+        game_add_particle(g, v3(pos.x, pos.y, pos.z), v3mul(d, frandr(1.0f, 3.2f)),
+                          build_color_for(p->build_mat), frandr(0.08f, 0.2f), frandr(0.2f, 0.45f), true, 5.0f, 1.2f);
+    }
+    if (p->id == g->local_player) {
+        audio_play(SFX_PICKUP_AMMO, 0.35f, 0.0f);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s aus %s gebaut  (%d)", game_build_piece_name(b->type),
+                 game_build_material_name(b->material), p->mats[p->build_mat]);
+        game_pickup_msg(g, "%s", msg);
+    }
+    return true;
+}
+
+void game_build_damage(Game* g, int piece, float dmg, int attacker, Vec3 point) {
+    (void)attacker;
+    if (!g || piece < 0 || piece >= MAX_BUILDS || dmg <= 0.0f) return;
+    BuildPiece* b = &g->builds[piece];
+    if (!b->active) return;
+    b->hp -= dmg;
+    b->damage_flash = 0.35f;
+    int n = dmg > 30.0f ? 9 : 4;
+    for (int i = 0; i < n; i++) {
+        Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.3f, 1), frandr(-1, 1)));
+        game_add_particle(g, point, v3mul(d, frandr(1.0f, 4.0f)), build_color_for(b->material),
+                          frandr(0.06f, 0.16f), frandr(0.18f, 0.4f), true, 5.0f, 1.0f);
+    }
+    if (b->hp > 0.0f) return;
+    int actor = b->actor;
+    if (actor >= 0 && actor < g->world->count) world_delete(g->world, actor);
+    for (int i = 0; i < MAX_BUILDS; i++) {
+        if (g->builds[i].active && g->builds[i].actor > actor) g->builds[i].actor--;
+    }
+    b->active = false;
+    for (int i = 0; i < 18; i++) {
+        Vec3 d = v3norm(v3(frandr(-1, 1), frandr(0.0f, 1.2f), frandr(-1, 1)));
+        game_add_particle(g, point, v3mul(d, frandr(2.0f, 7.0f)), build_color_for(b->material),
+                          frandr(0.12f, 0.3f), frandr(0.35f, 0.8f), true, 6.0f, 1.4f);
+    }
+    if (g->local_player >= 0 && g->local_player < g->num_players) {
+        Player* lp = &g->players[g->local_player];
+        audio_play_at(SFX_IMPACT, 0.7f, point.x, point.y, point.z,
+                      lp->pos.x, lp->pos.y, lp->pos.z,
+                      sinf(lp->yaw), -cosf(lp->yaw));
+    }
+}
+
+void game_build_clear(Game* g) {
+    if (!g) return;
+    for (;;) {
+        int best = -1, best_actor = -1;
+        for (int i = 0; i < MAX_BUILDS; i++) {
+            if (g->builds[i].active && g->builds[i].actor > best_actor) {
+                best_actor = g->builds[i].actor;
+                best = i;
+            }
+        }
+        if (best < 0) break;
+        int actor = g->builds[best].actor;
+        if (actor >= 0 && actor < g->world->count) world_delete(g->world, actor);
+        for (int i = 0; i < MAX_BUILDS; i++)
+            if (g->builds[i].active && g->builds[i].actor > actor) g->builds[i].actor--;
+        g->builds[best].active = false;
+    }
+    memset(g->builds, 0, sizeof(g->builds));
+    g->build_count = 0;
+}
+
+void game_build_update(Game* g, float dt) {
+    if (!g) return;
+    for (int i = 0; i < MAX_BUILDS; i++) {
+        BuildPiece* b = &g->builds[i];
+        if (!b->active) continue;
+        if (b->build_t > 0.0f) b->build_t = fmaxf(0.0f, b->build_t - dt);
+        if (b->damage_flash > 0.0f) b->damage_flash = fmaxf(0.0f, b->damage_flash - dt);
+    }
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->build_cd > 0.0f) p->build_cd -= dt;
+        if (p->harvest_cd > 0.0f) p->harvest_cd -= dt;
+    }
+    int count = 0;
+    for (int i = 0; i < MAX_BUILDS; i++) if (g->builds[i].active) count++;
+    g->build_count = count;
+}
+
+bool game_harvest(Game* g, Player* p) {
+    if (!g || !p || !p->alive || p->harvest_cd > 0.0f) return false;
+    int best = -1;
+    float bestd = 4.2f * 4.2f;
+    for (int i = 0; i < g->tree_count; i++) {
+        NatureProp* t = &g->trees[i];
+        if (!t->active) continue;
+        float dx = t->pos.x - p->pos.x, dz = t->pos.z - p->pos.z;
+        float dy = t->pos.y - p->pos.y;
+        if (dy < -1.5f || dy > t->height + 2.0f) continue;
+        float d = dx * dx + dz * dz;
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    if (best < 0) return false;
+    NatureProp* t = &g->trees[best];
+    int mat = 0, amount = 0;
+    if (t->kind == 4) { mat = 1; amount = 16 + (int)(frand() * 10.0f); }
+    else if (t->kind == 5) { mat = 2; amount = 14 + (int)(frand() * 9.0f); }
+    else if (t->kind == 3) { mat = 0; amount = 7 + (int)(frand() * 5.0f); }
+    else { mat = 0; amount = 15 + (int)(frand() * 10.0f); }
+    p->mats[mat] += amount;
+    p->harvest_cd = 0.32f;
+    p->harvest_target = best;
+    t->hp -= 34.0f;
+    Vec3 fx = v3(t->pos.x, t->pos.y + fminf(t->height * 0.6f, 2.4f), t->pos.z);
+    for (int i = 0; i < 10; i++) {
+        Vec3 d = v3norm(v3(frandr(-1, 1), frandr(-0.2f, 1), frandr(-1, 1)));
+        game_add_particle(g, fx, v3mul(d, frandr(1.0f, 4.0f)), build_color_for(mat),
+                          frandr(0.07f, 0.18f), frandr(0.2f, 0.5f), true, 4.0f, 1.2f);
+    }
+    if (t->hp <= 0.0f) {
+        t->active = 0;
+        for (int i = 0; i < 22; i++) {
+            Vec3 d = v3norm(v3(frandr(-1, 1), frandr(0.0f, 1.3f), frandr(-1, 1)));
+            game_add_particle(g, fx, v3mul(d, frandr(2.0f, 6.0f)), build_color_for(mat),
+                              frandr(0.12f, 0.3f), frandr(0.4f, 1.0f), true, 6.0f, 1.3f);
+        }
+    }
+    if (p->id == g->local_player) {
+        game_pickup_msg(g, "+%d %s  (%d)", amount, game_build_material_name(mat), p->mats[mat]);
+        audio_play(SFX_PICKUP_AMMO, 0.35f, 0.0f);
+    }
+    return true;
+}
+
+void game_render_builds(Game* g, Renderer* r) {
+    if (!g || !r) return;
+    int li = g->local_player;
+    if (li < 0 || li >= g->num_players) return;
+    Player* p = &g->players[li];
+    if (!p->alive || !p->build_mode) return;
+    Vec3 pos, size; float yaw; int shape; bool valid;
+    if (!game_build_preview(g, p, &pos, &size, &yaw, &shape, &valid)) return;
+    Color c = valid ? col(0.30f, 1.0f, 0.45f, 0.95f) : col(1.0f, 0.25f, 0.20f, 0.95f);
+    lines_begin(r);
+    AABB b = aabb_center_size(pos, size);
+    line_box(r, b, c);
+    /* diagonal hints make a ramp read as a ramp, not an empty box */
+    if (shape == SHAPE_RAMP) {
+        Vec3 f = v3(sinf(yaw), 0, -cosf(yaw));
+        Vec3 lo = v3(pos.x - f.x * size.z * 0.5f, pos.y - size.y * 0.5f, pos.z - f.z * size.z * 0.5f);
+        Vec3 hi = v3(pos.x + f.x * size.z * 0.5f, pos.y + size.y * 0.5f, pos.z + f.z * size.z * 0.5f);
+        line_add(r, v3(lo.x - size.x * 0.5f, lo.y, lo.z), v3(hi.x - size.x * 0.5f, hi.y, hi.z), c);
+        line_add(r, v3(lo.x + size.x * 0.5f, lo.y, lo.z), v3(hi.x + size.x * 0.5f, hi.y, hi.z), c);
+        line_add(r, v3(lo.x - size.x * 0.5f, lo.y, lo.z), v3(lo.x + size.x * 0.5f, lo.y, lo.z), c);
+        line_add(r, v3(hi.x - size.x * 0.5f, hi.y, hi.z), v3(hi.x + size.x * 0.5f, hi.y, hi.z), c);
+    }
+    lines_render(r, true, 2.0f);
+}
+
+/* Battle Royale storm wall: a visible ring so players can read the shrinking
+ * zone instead of only seeing the damage vignette. */
+void game_render_zone(Game* g, Renderer* r) {
+    if (!g || !r) return;
+    if (g->game_mode != GM_BATTLE_ROYALE || g->zone_radius <= 2.0f) return;
+    Vec3 c;
+    float e;
+    map_bounds(g->world, &c, &e);
+    float y0 = c.y + 0.05f;
+    float y1 = c.y + 46.0f;
+    Color wall = col(0.58f, 0.34f, 1.0f, 0.85f);
+    Color ring = col(0.72f, 0.52f, 1.0f, 0.95f);
+    lines_begin(r);
+    const int SEG = 72;
+    Vec3 prev = v3(g->zone_center_x + g->zone_radius, y0, g->zone_center_z);
+    for (int i = 1; i <= SEG; i++) {
+        float a = (float)i * 6.28318f / (float)SEG;
+        Vec3 p = v3(g->zone_center_x + cosf(a) * g->zone_radius, y0, g->zone_center_z + sinf(a) * g->zone_radius);
+        line_add(r, prev, p, ring);
+        if ((i % 2) == 0)
+            line_add(r, v3(p.x, y0, p.z), v3(p.x, y1, p.z), wall);
+        prev = p;
+    }
+    lines_render(r, true, 1.6f);
+}
+
+/* ------------------------------------------------------------------ */
+/* Altis Life - lightweight Arma 3 style roleplay layer               */
+/* ------------------------------------------------------------------ */
+const char* game_life_point_name(int type) {
+    switch (type) {
+    case LIFE_JOB: return "JOB CENTER";
+    case LIFE_DELIVERY: return "DELIVERY DEPOT";
+    case LIFE_MINE: return "ORE MINE";
+    case LIFE_SHOP: return "24/7 SHOP";
+    case LIFE_ATM: return "BANK ATM";
+    case LIFE_HOSPITAL: return "HOSPITAL";
+    default: return "POINT";
+    }
+}
+static Color life_point_color(int type) {
+    switch (type) {
+    case LIFE_JOB: return col3(1.0f, 0.82f, 0.22f);
+    case LIFE_DELIVERY: return col3(1.0f, 0.48f, 0.14f);
+    case LIFE_MINE: return col3(0.62f, 0.55f, 0.45f);
+    case LIFE_SHOP: return col3(0.28f, 0.92f, 0.48f);
+    case LIFE_ATM: return col3(0.25f, 0.62f, 1.0f);
+    case LIFE_HOSPITAL: return col3(1.0f, 0.28f, 0.30f);
+    }
+    return col3(0.8f, 0.8f, 0.8f);
+}
+static Vec3 life_ground_spot(Game* g, float x, float z) {
+    Vec3 c; float e;
+    map_bounds(g->world, &c, &e);
+    bool ok = false;
+    float gy = nature_ground_at(g->world, x, z, c.y + 400.0f, &ok);
+    if (!ok) gy = c.y + 0.2f;
+    Vec3 p = v3(x, gy + 0.06f, z);
+    if (!spawn_clear(g->world, p, 0.95f)) p = spawn_safe_pos(g->world, p);
+    return p;
+}
+void game_life_setup(Game* g) {
+    if (!g) return;
+    g->life_point_count = 0;
+    g->life_near = -1;
+    if (g->game_mode != GM_ALTIS) return;
+    Vec3 c; float e;
+    map_bounds(g->world, &c, &e);
+    if (e < 22.0f) e = 22.0f;
+    struct { int type; float x, z; } defs[] = {
+        { LIFE_JOB,      -0.30f, -0.20f },
+        { LIFE_DELIVERY,  0.34f,  0.16f },
+        { LIFE_MINE,      0.40f, -0.38f },
+        { LIFE_SHOP,     -0.34f,  0.30f },
+        { LIFE_ATM,       0.16f,  0.36f },
+        { LIFE_HOSPITAL, -0.10f, -0.38f },
+        { LIFE_SHOP,      0.42f,  0.34f },
+        { LIFE_ATM,      -0.40f, -0.02f },
+        { LIFE_JOB,       0.04f,  0.42f },
+        { LIFE_HOSPITAL,  0.42f, -0.12f }
+    };
+    int n = (int)(sizeof(defs) / sizeof(defs[0]));
+    static const char* ARMA_NAMES[] = {
+        "KAVALA JOB CENTER", "ATHIRA DELIVERY", "PYRGOS MINE", "SOFIA 24/7",
+        "KAVALA BANK ATM", "KAVALA HOSPITAL", "NEOCHORI 24/7", "ATHIRA BANK ATM",
+        "PYRGOS JOB CENTER", "PYRGOS HOSPITAL"
+    };
+    for (int i = 0; i < n && g->life_point_count < MAX_LIFE_POINTS; i++) {
+        LifePoint* lp = &g->life_points[g->life_point_count];
+        memset(lp, 0, sizeof(*lp));
+        lp->type = defs[i].type;
+        lp->pos = life_ground_spot(g, c.x + e * defs[i].x, c.z + e * defs[i].z);
+        lp->radius = 3.0f;
+        snprintf(lp->name, sizeof(lp->name), "%s", ARMA_NAMES[i]);
+        g->life_point_count++;
+    }
+}
+int game_life_nearest(Game* g, Player* p, float maxdist) {
+    if (!g || !p || g->game_mode != GM_ALTIS) return -1;
+    int best = -1;
+    float bd = maxdist * maxdist;
+    for (int i = 0; i < g->life_point_count; i++) {
+        LifePoint* lp = &g->life_points[i];
+        float dx = lp->pos.x - p->pos.x, dz = lp->pos.z - p->pos.z;
+        float dy = fabsf(lp->pos.y - p->pos.y);
+        if (dy > 5.0f) continue;
+        float d = dx * dx + dz * dz;
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+static void life_msg(Game* g, Player* p, const char* fmt, ...) {
+    if (!p || p->id != g->local_player) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(p->life_msg, sizeof(p->life_msg), fmt, ap);
+    va_end(ap);
+    p->life_msg_t = 4.0f;
+    game_pickup_msg(g, "%s", p->life_msg);
+}
+static void life_reward(Game* g, Player* p, int cash, const char* what) {
+    if (cash == 0) return;
+    p->cash += cash;
+    if (p->cash < 0) p->cash = 0;
+    if (p->id == g->local_player) {
+        game_add_killfeed(g, "%s: %+d $", what, cash);
+        audio_play(SFX_PICKUP_AMMO, 0.4f, 0.0f);
+    }
+}
+bool game_life_interact(Game* g, Player* p) {
+    if (!g || !p || !p->alive || g->game_mode != GM_ALTIS) return false;
+    int pi = game_life_nearest(g, p, 3.6f);
+    if (pi < 0) return false;
+    LifePoint* lp = &g->life_points[pi];
+    if (p->life_cd > 0.0f) return false;
+    switch (lp->type) {
+    case LIFE_JOB:
+        if (p->life_job == 1) {
+            life_msg(g, p, "Du hast bereits einen Lieferauftrag");
+        } else {
+            p->life_job = 1;
+            p->life_stage = 0;
+            p->life_cd = 0.4f;
+            life_msg(g, p, "AUFTRAG: Fracht zum DELIVERY DEPOT bringen");
+            if (p->id == g->local_player) game_announce(g, "DELIVERY CONTRACT", col3(0.35f, 0.95f, 0.55f), 2.0f);
+        }
+        break;
+    case LIFE_DELIVERY:
+        if (p->life_job == 1 && p->life_stage == 0) {
+            int pay = 260 + (int)(frand() * 180.0f);
+            p->life_job = 0;
+            p->life_stage = 0;
+            p->life_cd = 0.5f;
+            life_reward(g, p, pay, "DELIVERY");
+            life_msg(g, p, "Fracht geliefert: +%d $", pay);
+            if (p->id == g->local_player) game_announce(g, "DELIVERY COMPLETE", col3(0.35f, 0.95f, 0.55f), 2.0f);
+        } else {
+            life_msg(g, p, "Kein Auftrag - hole einen Vertrag im JOB CENTER");
+        }
+        break;
+    case LIFE_MINE:
+        if (p->life_cd <= 0.0f) {
+            int add = 1 + (int)(frand() * 2.0f);
+            p->ore += add;
+            p->life_cd = 0.55f;
+            life_msg(g, p, "+%d Erz  (%d im Rucksack)", add, p->ore);
+            if (p->id == g->local_player) audio_play(SFX_PICKUP_AMMO, 0.3f, 0.0f);
+        }
+        break;
+    case LIFE_SHOP:
+        if (p->ore > 0) {
+            int pay = p->ore * 55;
+            p->ore = 0;
+            p->life_cd = 0.4f;
+            life_reward(g, p, pay, "ORE SOLD");
+            life_msg(g, p, "Erz verkauft: +%d $", pay);
+        } else if (p->cash >= 120) {
+            p->cash -= 120;
+            p->mats[0] += 30;
+            p->mats[1] += 20;
+            p->mats[2] += 10;
+            p->life_cd = 0.4f;
+            life_msg(g, p, "Baumaterial gekauft: +30 Holz +20 Stein +10 Metall");
+        } else {
+            life_msg(g, p, "Nichts zu verkaufen - Erz im MINE abbauen");
+        }
+        break;
+    case LIFE_ATM:
+        if (p->cash > 0) {
+            int dep = p->cash;
+            p->bank += dep;
+            p->cash = 0;
+            p->life_cd = 0.4f;
+            life_msg(g, p, "%d $ eingezahlt  (Bank: %d $)", dep, p->bank);
+        } else if (p->bank > 0) {
+            int take = p->bank < 500 ? p->bank : 500;
+            p->bank -= take;
+            p->cash += take;
+            p->life_cd = 0.4f;
+            life_msg(g, p, "%d $ abgehoben  (Bank: %d $)", take, p->bank);
+        } else {
+            life_msg(g, p, "Konto leer");
+        }
+        break;
+    case LIFE_HOSPITAL:
+        if (p->wanted > 0) {
+            /* Arma-style consequence: the hospital will patch you up and clear
+             * your record, but only if you can pay the police fine. */
+            int fine = p->wanted * 120;
+            if (p->cash >= fine) {
+                p->cash -= fine;
+                p->wanted = 0;
+                p->life_cd = 0.5f;
+                life_msg(g, p, "Krankenhaus: Strafe %d $ bezahlt, Akte bereinigt", fine);
+            } else {
+                life_msg(g, p, "Strafe %d $ offen - Wanted bleibt (Bargeld: %d $)", fine, p->cash);
+            }
+        } else if (p->health < game_player_max_health(p)) {
+            int cost = 100;
+            if (p->cash < cost) {
+                life_msg(g, p, "Behandlung kostet %d $ - zu wenig Bargeld", cost);
+            } else {
+                p->cash -= cost;
+                p->health = game_player_max_health(p);
+                p->armor = fmaxf(p->armor, 25.0f);
+                p->life_cd = 0.5f;
+                life_msg(g, p, "Behandelt: -%d $", cost);
+            }
+        } else {
+            life_msg(g, p, "Du bist gesund");
+        }
+        break;
+    }
+    return true;
+}
+void game_life_update(Game* g, float dt) {
+    if (!g) return;
+    if (g->game_mode != GM_ALTIS) { g->life_near = -1; return; }
+    g->life_tick += dt;
+    for (int i = 0; i < g->num_players; i++) {
+        Player* p = &g->players[i];
+        if (p->life_cd > 0.0f) p->life_cd -= dt;
+        if (p->life_msg_t > 0.0f) p->life_msg_t -= dt;
+    }
+    int li = g->local_player;
+    if (li >= 0 && li < g->num_players)
+        g->life_near = game_life_nearest(g, &g->players[li], 3.6f);
+}
+void game_render_life(Game* g, Renderer* r) {
+    if (!g || !r || g->game_mode != GM_ALTIS) return;
+    for (int i = 0; i < g->life_point_count; i++) {
+        LifePoint* lp = &g->life_points[i];
+        Color c = life_point_color(lp->type);
+        float pulse = 0.85f + 0.15f * sinf(g->time * 2.0f + (float)i);
+        renderer_draw_model(r, &r->cylinder,
+            mat4_from_trs(v3(lp->pos.x, lp->pos.y + 0.06f, lp->pos.z), v3(0, g->time * 0.6f, 0),
+                          v3(1.7f, 0.12f, 1.7f)), c, 5, 1.4f, 1.0f, false);
+        renderer_draw_model(r, &r->cylinder,
+            mat4_from_trs(v3(lp->pos.x, lp->pos.y + 3.2f, lp->pos.z), v3(0, 0, 0),
+                          v3(0.10f, 3.2f, 0.10f)), c, 5, 1.2f * pulse, 1.0f, false);
+        renderer_draw_model(r, &r->sphere,
+            mat4_from_trs(v3(lp->pos.x, lp->pos.y + 6.7f + sinf(g->time * 2.2f + i) * 0.22f, lp->pos.z),
+                          v3(0, g->time, 0), v3(0.75f, 0.75f, 0.75f)), c, 5, 1.8f, 1.0f, false);
+    }
+}
+
 static int pick_spawn(Game* g, Player* p) {
     int best = -1; float best_score = -1e9f;
     for (int i = 0; i < g->world->count; i++) {
         Actor* a = &g->world->actors[i];
         if (a->type != ACT_PLAYER_START) continue;
         float score = frandr(0, 6);
+        /* Never pick an authored start that is buried in a brush or squeezed
+         * into a decorative pocket; those are the "spawned in a barrel" cases. */
+        Vec3 feet = v3add(a->pos, v3(0, 0.15f, 0));
+        if (spawn_clear(g->world, feet, 1.15f)) score += 500.0f;
+        else if (spawn_pos_free(g->world, feet) && spawn_has_floor(g->world, feet)) score += 20.0f;
+        else score -= 500.0f;
         for (int j = 0; j < g->num_players; j++) {
             Player* o = &g->players[j];
             if (o == p || !o->active || !o->alive) continue;
             float d = v3len(v3sub(o->pos, a->pos));
             score += d * 2.2f;
-            if (d < 8.0f) score -= 80.0f;
+            /* Never stack two players on the same start: the clearance bonus
+             * above would otherwise outweigh the proximity penalty. */
+            if (d < 3.0f) score -= 5000.0f;
+            else if (d < 8.0f) score -= 120.0f;
         }
         if (p->team >= 0) {
             Vec3 own = g->team_base[p->team], foe = g->team_base[1 - p->team];
@@ -1023,14 +1795,30 @@ void game_respawn(Game* g, Player* p) {
         p->respawn_timer = 1e9f;
         return;
     }
-    int si = pick_spawn(g, p);
-    if (si >= 0) {
-        Actor* a = &g->world->actors[si];
-        p->pos = v3add(a->pos, v3(0, 0.15f, 0));
-        p->yaw = a->yaw * DEG2RAD;
+    int altis_hospital = -1;
+    if (g->game_mode == GM_ALTIS) {
+        for (int i = 0; i < g->life_point_count; i++) {
+            if (g->life_points[i].type == LIFE_HOSPITAL) { altis_hospital = i; break; }
+        }
+    }
+    if (altis_hospital >= 0) {
+        LifePoint* lp = &g->life_points[altis_hospital];
+        p->pos = spawn_safe_pos(g->world, v3add(lp->pos, v3(frandr(-2.0f, 2.0f), 0.6f, frandr(-2.0f, 2.0f))));
+        p->yaw = atan2f(lp->pos.x - p->pos.x, -(lp->pos.z - p->pos.z));
     } else {
-        p->pos = v3(0, 0.5f, 20);
-        p->yaw = 0;
+        int si = pick_spawn(g, p);
+        if (si >= 0) {
+            Actor* a = &g->world->actors[si];
+            p->pos = spawn_safe_pos(g->world, v3add(a->pos, v3(0, 0.15f, 0)));
+            p->yaw = a->yaw * DEG2RAD;
+            if (getenv("A2K4_CAMDBG"))
+                printf("[spawn] player=%d start=%s authored=(%.2f,%.2f,%.2f) -> pos=(%.2f,%.2f,%.2f) yaw=%.0f\n",
+                       p->id, a->name, a->pos.x, a->pos.y, a->pos.z,
+                       p->pos.x, p->pos.y, p->pos.z, p->yaw * RAD2DEG);
+        } else {
+            p->pos = v3(0, 0.5f, 20);
+            p->yaw = 0;
+        }
     }
     p->vel = v3(0, 0, 0);
     p->pitch = 0;
@@ -1045,9 +1833,14 @@ void game_respawn(Game* g, Player* p) {
     p->weapon = WPN_AR;
     p->has[WPN_AR] = true;
     p->ammo[WPN_AR] = 60;
+    p->mag[WPN_AR] = game_player_mag_cap(WPN_AR);
+    p->reload_timer = 0; p->reload_total = 0; p->reload_weapon = -1;
     p->fire_timer = 0; p->alt_timer = 0;
     p->jump_count = 0;
     p->crouch = false;
+    /* A dead builder must not respawn still holding a ghost blueprint. */
+    p->build_mode = false;
+    p->build_cd = 0.0f;
     p->grounded = false;
     p->bob = 0; p->land_kick = 0; p->recoil = 0;
     p->render_pos = p->pos;
@@ -1056,6 +1849,10 @@ void game_respawn(Game* g, Player* p) {
     p->bot_path_len = 0; p->bot_path_idx = 0; p->bot_target = -1; p->bot_repath = 0;
     p->bot_vehicle_target = -1; p->bot_vehicle_t = frandr(0.2f, 1.2f);
     p->use_latch = false;
+    /* Fortnite-style loadout: spawn with a starter stack of wood so the first
+     * wall can go up immediately; stone/metal must be harvested. */
+    if (g->game_mode != GM_ALTIS && p->mats[0] <= 0 && p->mats[1] <= 0 && p->mats[2] <= 0)
+        p->mats[0] = 60;
     if (g->local_player == p->id) g->damage_flash = 0;
     if (g->local_player == p->id) audio_play(SFX_RESPAWN, 0.7f, 0);
 }
@@ -1145,6 +1942,29 @@ static void setup_objectives(Game* g) {
             game_spawn_vehicle_type(g, t, 0);
             game_spawn_vehicle_type(g, t, 1);
         }
+    } else if (g->game_mode == GM_ALTIS) {
+        /* Arma-flavoured civilian motor pool: parked cars scattered around the
+         * Altis towns so roleplayers can actually drive between POIs. */
+        Vec3 lc; float le;
+        map_bounds(g->world, &lc, &le);
+        if (le < 22.0f) le = 22.0f;
+        static const float spots[5][2] = {
+            { -0.18f, -0.05f }, { 0.22f, 0.10f }, { 0.05f, 0.30f },
+            { -0.30f, 0.24f }, { 0.34f, -0.24f }
+        };
+        for (int i = 0; i < 5; i++) {
+            int vi = game_spawn_vehicle_type(g, -1, 0);
+            if (vi < 0) break;
+            Vec3 p = v3(lc.x + le * spots[i][0], lc.y + 0.05f, lc.z + le * spots[i][1]);
+            Ray down; down.origin = v3(p.x, lc.y + 80.0f, p.z); down.dir = v3(0, -1, 0);
+            RayHit h;
+            if (world_raycast(g->world, down, 220.0f, true, &h) && h.normal.y > 0.4f)
+                p.y = h.point.y + 0.05f;
+            p = spawn_safe_pos(g->world, p);
+            g->vehicles[vi].home = p;
+            g->vehicles[vi].pos = p;
+            g->vehicles[vi].yaw = (float)i * 1.21f;
+        }
     }
     if (g->game_mode == GM_BATTLE_ROYALE) {
         Vec3 c; float e;
@@ -1163,6 +1983,9 @@ static void setup_objectives(Game* g) {
 }
 
 void game_reset(Game* g) {
+    /* Player-built structures are runtime actors: remove them before the map
+     * actors are indexed for pickups/spawns. */
+    game_build_clear(g);
     /* Leaving Invasion (or restarting it) must remove every zombie slot before
      * the normal player team/spawn setup runs. Survivor slots are always the
      * compact prefix, zombies are appended after them. */
@@ -1231,6 +2054,7 @@ void game_reset(Game* g) {
     }
     assign_teams(g);
     setup_objectives(g);
+    game_life_setup(g);
     for (int i = 0; i < g->num_players; i++) {
         Player* p = &g->players[i];
         if (!p->active) continue;
@@ -1245,6 +2069,12 @@ void game_reset(Game* g) {
         g->frag_limit = 1000000;
         g->score_limit = 0.0f;
         game_announce(g, "ZOMBIE INVASION - HOLD THE LINE", col3(0.55f, 0.95f, 0.35f), 3.0f);
+    }
+    if (g->game_mode == GM_ALTIS) {
+        g->time_limit = 1e9f;
+        g->frag_limit = 1000000;
+        g->score_limit = 0.0f;
+        game_announce(g, "ALTIS LIFE - ARBEITE, HANDLE, UEBERLEBE", col3(0.35f, 0.95f, 0.55f), 3.5f);
     }
     g->start_countdown = 1.6f;
     g->started = true;
@@ -1333,9 +2163,24 @@ void game_explosion(Game* g, Vec3 pos, float radius, float damage, int attacker,
             float f = 1.0f - d / radius;
             game_damage_vehicle(g, i, damage * (0.45f + 0.55f * f), attacker, pos);
         }
+        /* Fortnite building: explosions chew through player structures too. */
+        for (int i = 0; i < MAX_BUILDS; i++) {
+            BuildPiece* b = &g->builds[i];
+            if (!b->active) continue;
+            Vec3 c = b->pos;
+            float d = v3len(v3sub(c, pos));
+            if (d > radius + fmaxf(b->size.x, b->size.z) * 0.5f) continue;
+            float f = 1.0f - clamp01(d / (radius + 1.0f));
+            game_build_damage(g, i, damage * (0.45f + 0.75f * f), attacker, c);
+        }
     }
-    audio_play_at(SFX_EXPLODE, 1.0f, pos.x, pos.y, pos.z, g->players[g->local_player].pos.x, g->players[g->local_player].pos.y, g->players[g->local_player].pos.z,
-                  sinf(g->players[g->local_player].yaw), -cosf(g->players[g->local_player].yaw));
+    if (g->local_player >= 0 && g->local_player < g->num_players) {
+        Player* lp = &g->players[g->local_player];
+        audio_play_at(SFX_EXPLODE, 1.0f, pos.x, pos.y, pos.z, lp->pos.x, lp->pos.y, lp->pos.z,
+                      sinf(lp->yaw), -cosf(lp->yaw));
+    } else {
+        audio_play_at(SFX_EXPLODE, 1.0f, pos.x, pos.y, pos.z, pos.x, pos.y, pos.z, 0, 1);
+    }
 }
 
 void game_damage_vehicle(Game* g, int vi, float dmg, int attacker, Vec3 point) {
@@ -1524,6 +2369,8 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
         victim->respawn_timer = victim->zombie ? 1.15f :
                                 ((g->game_mode == GM_BATTLE_ROYALE) ? 1e9f : 2.4f);
         victim->vel = v3(0, 0, 0);
+        victim->build_mode = false;
+        victim->build_cd = 0.0f;
         if (victim->in_vehicle) {
             int vi = victim->vehicle;
             if (vi >= 0 && vi < g->vehicle_count) g->vehicles[vi].driver = -1;
@@ -1531,6 +2378,24 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
             victim->vehicle = -1;
         }
         victim->killer = attacker;
+        if (g->game_mode == GM_ALTIS) {
+            if (attacker >= 0 && attacker < g->num_players && attacker != victim->id) {
+                Player* a = &g->players[attacker];
+                a->wanted = a->wanted < 5 ? a->wanted + 1 : 5;
+                if (a->id == g->local_player)
+                    game_announce(g, "WANTED LEVEL ERHOEHT", col3(1.0f, 0.35f, 0.25f), 2.2f);
+            }
+            int lost = victim->cash / 5;
+            victim->cash -= lost;
+            victim->ore = 0;
+            victim->life_job = 0;
+            victim->life_stage = 0;
+            if (victim->id == g->local_player) {
+                char lc[96];
+                snprintf(lc, sizeof(lc), "HOSPITALRECHNUNG -%d $", lost);
+                game_announce(g, lc, col3(1.0f, 0.55f, 0.30f), 2.4f);
+            }
+        }
         int wi = victim->weapon;
         (void)wi;
         /* death fx */
@@ -1555,6 +2420,14 @@ void game_damage(Game* g, Player* victim, float dmg, int attacker, Vec3 dir, Vec
                 game_add_reward(g, a, 25 + victim->zombie_type * 20, 8 + victim->zombie_type * 4, "ZOMBIE KILL");
             } else if (!victim->zombie) {
                 game_add_reward(g, a, 100 + victim->level * 10, 20, "KILL");
+                /* Fortnite loop: eliminations feed the build economy. */
+                if (g->game_mode != GM_ALTIS) {
+                    a->mats[0] += 25;
+                    a->mats[1] += 15;
+                    a->mats[2] += 10;
+                    if (a->id == g->local_player)
+                        game_pickup_msg(g, "BEUTE: +25 Holz  +15 Stein  +10 Metall");
+                }
             }
             /* assist for the last other player who damaged the victim */
             if (victim->last_attacker >= 0 && victim->last_attacker < g->num_players &&
@@ -1741,6 +2614,18 @@ static void fire_hitscan(Game* g, Player* p, float damage, float spread, Color c
         Vec3 limit = hitp ? hpt : end;
         hitv = trace_vehicles(g, eye, limit, p->id, &hv, &hvt, &hmod);
     }
+    if (!combo && h.hit && !hitp && !hitv) {
+        int bp = game_build_index_for_actor(g, h.actor);
+        if (bp >= 0) {
+            game_build_damage(g, bp, damage, p->id, h.point);
+            for (int i = 0; i < 6; i++) {
+                Vec3 d = v3norm(v3add(dir, v3(frandr(-0.75f, 0.75f), frandr(-0.75f, 0.75f), frandr(-0.75f, 0.75f))));
+                game_add_particle(g, h.point, v3mul(d, frandr(1.4f, 4.2f)),
+                                  build_color_for(g->builds[bp].material),
+                                  frandr(0.08f, 0.2f), frandr(0.2f, 0.45f), true, 4.0f, 1.2f);
+            }
+        }
+    }
     if (hitv) {
         end = hvt; wd = v3len(v3sub(hvt, eye));
         game_damage_vehicle_part(g, hv, damage, p->id, hvt, hmod);
@@ -1823,11 +2708,19 @@ void game_fire(Game* g, Player* p, bool alt) {
         if (p->id == g->local_player) audio_play(SFX_UI_CLICK, 0.35f, 0);
         return;
     }
+    if (p->reload_timer > 0.0f) return;
+    if (p->mag[wi] <= 0) {
+        /* Pulling the trigger on an empty magazine starts a reload. */
+        reload_begin(p);
+        if (p->id == g->local_player) audio_play(SFX_UI_CLICK, 0.3f, 0);
+        return;
+    }
     float delay = alt ? wd->alt_delay : wd->fire_delay;
     float rate = game_player_fire_mult(p);
     if (rate < 0.25f) rate = 0.25f;
     p->fire_timer = delay * rate;
     p->ammo[wi] -= 1;
+    p->mag[wi] -= 1;
     p->muzzle_flash = 0.09f;
     p->recoil = fminf(p->recoil + 0.6f, 1.5f);
     p->view_kick += alt ? 0.05f : 0.035f;
@@ -1909,7 +2802,9 @@ static void give_weapon(Game* g, Player* p, int type, int wi) {
     (void)type;
     p->has[wi] = true;
     p->ammo[wi] = game_player_ammo_max(p, wi);
+    p->mag[wi] = game_player_mag_cap(wi);
     p->weapon = wi;
+    p->reload_timer = 0; p->reload_total = 0; p->reload_weapon = -1;
     if (p->id == g->local_player) {
         game_pickup_msg(g, "Picked up %s", weapon_defs[wi].name);
         audio_play(SFX_PICKUP_WEAPON, 0.7f, 0);
@@ -1990,6 +2885,7 @@ static void update_projectiles(Game* g, float dt) {
         Vec3 step = v3mul(pr->vel, dt);
         float sl = v3len(step);
         bool boom = false;
+        int build_hit = -1;
         if (sl > 0.0001f) {
             Ray r; r.origin = prev; r.dir = v3mul(step, 1.0f / sl);
             RayHit h;
@@ -2001,7 +2897,7 @@ static void update_projectiles(Game* g, float dt) {
                     pr->vel = v3sub(pr->vel, v3mul(n, 1.65f * vn));
                     pr->vel = v3mul(pr->vel, 0.55f);
                     pr->bounces--;
-                } else { pr->pos = h.point; boom = true; }
+                } else { pr->pos = h.point; boom = true; build_hit = game_build_index_for_actor(g, h.actor); }
             }
             else pr->pos = v3add(prev, step);
         } else pr->pos = v3add(prev, step);
@@ -2016,6 +2912,8 @@ static void update_projectiles(Game* g, float dt) {
         if (hitv) { pr->pos = hvt; boom = true; hp = -1; }
         else if (hitp) { pr->pos = hpt; boom = true; }
         if (boom) {
+            if (build_hit >= 0 && pr->splash <= 0.0f)
+                game_build_damage(g, build_hit, pr->damage, pr->owner, pr->pos);
             if (pr->splash > 0) game_explosion(g, pr->pos, pr->radius, pr->damage, pr->owner, pr->color);
             else {
                 if (hp >= 0) game_damage(g, &g->players[hp], pr->damage, pr->owner, v3norm(pr->vel), pr->pos, pr->type);
@@ -2099,6 +2997,12 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (p->land_kick > 0) p->land_kick = fmaxf(0, p->land_kick - dt * 5.0f);
     if (p->vamp_flash > 0) p->vamp_flash = fmaxf(0, p->vamp_flash - dt * 2.5f);
     if (p->dodge_cooldown > 0) p->dodge_cooldown -= dt;
+    reload_tick(g, p, dt);
+    if (p->reload_timer <= 0.0f) {
+        bool want_reload = p->input.reload ||
+            (p->bot && p->mag[p->weapon] <= 0 && p->ammo[p->weapon] > 0);
+        if (want_reload) reload_begin(p);
+    }
 
     float yaw = p->yaw;
     Vec3 fwd = v3(sinf(yaw), 0, -cosf(yaw));
@@ -2183,13 +3087,38 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (p->dodge_timer > 0) { accel = 0; max_speed = 18.0f; }
     if (veh_type < 0) max_speed *= game_player_speed_mult(p);
     Vec3 hv = v3(p->vel.x, 0, p->vel.z);
+    bool ground_friction = p->grounded && veh_type < 0 && p->dodge_timer <= 0.0f;
+    /* Ground friction: momentum that is not in the wish direction is bled
+     * off. Previously velocity was only damped when there was no input at
+     * all, so changing direction kept the old sideways momentum and the
+     * player appeared to "surf" across the floor. */
+    if (ground_friction) {
+        float spd = v3len(hv);
+        if (spd > 0.001f) {
+            float drop = fmaxf(spd, 2.0f) * 7.5f * dt;
+            float ns = fmaxf(0.0f, spd - drop);
+            float sc = ns / spd;
+            p->vel.x *= sc;
+            p->vel.z *= sc;
+            hv = v3(p->vel.x, 0, p->vel.z);
+        }
+    }
     if (wl > 0.05f) {
         float cur = v3dot(hv, wish);
         float add = clampf(max_speed - cur, 0, accel * dt * max_speed);
         p->vel.x += wish.x * add;
         p->vel.z += wish.z * add;
-    } else if (p->grounded) {
-        float f = fmaxf(0.0f, 1.0f - 9.5f * dt);
+        /* Also scrub the component perpendicular to the wish direction so
+         * strafing turns the velocity instead of sliding sideways. */
+        if (ground_friction) {
+            Vec3 side = v3(-wish.z, 0, wish.x);
+            float lat = v3dot(p->vel, side);
+            float kill = clampf(12.0f * dt, 0.0f, 1.0f);
+            p->vel.x -= side.x * lat * kill;
+            p->vel.z -= side.z * lat * kill;
+        }
+    } else if (p->grounded && veh_type < 0) {
+        float f = fmaxf(0.0f, 1.0f - 12.0f * dt);
         p->vel.x *= f;
         p->vel.z *= f;
         if (fabsf(p->vel.x) < 0.02f) p->vel.x = 0;
@@ -2207,16 +3136,44 @@ static void update_player_movement(Game* g, Player* p, float dt) {
         if (p->vel.y < -55.0f) p->vel.y = -55.0f;
     }
 
-    bool grounded = false, hit_wall = false;
+    bool grounded = p->grounded, hit_wall = false;
     int ga = -1;
     Vec3 pre_move = p->pos;
-    world_move_box(g->world, &p->pos, &p->vel, dt, 0.40f, player_height(p), &grounded, &hit_wall, &ga);
+    /* Sub-step long moves: at terminal velocity a single frame could skip a
+     * thin platform or tunnel through a wall. 0.25 m per step keeps every
+     * collision thick enough to catch. */
+    {
+        float travel = (fabsf(p->vel.x) + fabsf(p->vel.z) + fabsf(p->vel.y)) * dt;
+        int subs = (int)ceilf(travel / 0.25f);
+        if (subs < 1) subs = 1;
+        if (subs > 10) subs = 10;
+        float sdt = dt / (float)subs;
+        bool wall_any = false;
+        for (int s = 0; s < subs; s++) {
+            bool step_wall = false;
+            world_move_box(g->world, &p->pos, &p->vel, sdt, 0.40f, player_height(p),
+                           &grounded, &step_wall, &ga);
+            wall_any = wall_any || step_wall;
+        }
+        hit_wall = wall_any;
+    }
     if (getenv("A2K4_COMBATLOG") && (fabsf(p->pos.x) > 40.0f || fabsf(p->pos.z) > 40.0f) && fabsf(pre_move.x) <= 40.0f && fabsf(pre_move.z) <= 40.0f) {
         fprintf(stderr, "[bounds] %s from %.1f,%.1f,%.1f to %.1f,%.1f,%.1f vel %.1f,%.1f,%.1f pad=%d\n",
                 p->name, pre_move.x, pre_move.y, pre_move.z, p->pos.x, p->pos.y, p->pos.z,
                 p->vel.x, p->vel.y, p->vel.z, p->grounded);
     }
     p->grounded = grounded;
+    p->hit_wall_last_frame = hit_wall;
+    /* If the player keeps pushing into geometry without moving at all, flag
+     * it for the F3 overlay and auto-unstuck. */
+    if (wl > 0.2f) {
+        float dx = p->pos.x - pre_move.x, dz = p->pos.z - pre_move.z;
+        bool blocked = (dx * dx + dz * dz) < 0.000001f;
+        if (blocked && !grounded) p->stuck_last_frame = true;
+        else p->stuck_last_frame = false;
+    } else {
+        p->stuck_last_frame = false;
+    }
     if (grounded) {
         p->jump_count = 0;
         if (!was_grounded) {
@@ -2274,8 +3231,13 @@ static void update_player_movement(Game* g, Player* p, float dt) {
     if (p->pos.y < -20.0f) game_damage(g, p, 500.0f, -1, v3(0, 1, 0), p->pos, WPN_COUNT);
     p->yaw = p->input.yaw;
     p->pitch = clampf(p->input.pitch, -1.45f, 1.45f);
-    if (p->input.fire && !p->fire_latch) game_fire(g, p, false);
-    if (p->input.alt_fire && !p->alt_latch) game_fire(g, p, true);
+    if (p->build_mode) {
+        if (p->input.fire && !p->fire_latch) game_build_attempt(g, p);
+        if (p->input.alt_fire && !p->alt_latch) game_build_rotate(p);
+    } else {
+        if (p->input.fire && !p->fire_latch) game_fire(g, p, false);
+        if (p->input.alt_fire && !p->alt_latch) game_fire(g, p, true);
+    }
     p->fire_latch = p->input.fire;
     p->alt_latch = p->input.alt_fire;
 }
@@ -2749,9 +3711,49 @@ void game_demo_input(Game* g, float dt) {
     (void)g; (void)dt;
 }
 
+/* Altis Life civilians: bots wander between POIs, never fight, and let the
+ * player do the jobs. Kept separate from bot_think so combat AI never turns
+ * the roleplay map into a deathmatch. */
+static void bot_altis_civilian(Game* g, Player* p, float dt) {
+    if (!p->alive) return;
+    p->input.fire = false;
+    p->input.alt_fire = false;
+    p->input.use = false;
+    p->bot_think_t -= dt;
+    if (p->bot_think_t > 0) return;
+    p->bot_think_t = frandr(0.6f, 1.8f);
+
+    /* pick a random POI to stroll towards when idle or arrived */
+    Vec3 target;
+    if (g->life_point_count <= 0) {
+        target = v3(0, p->pos.y, 0);
+    } else {
+        if (p->bot_target < 0 || p->bot_target >= g->life_point_count ||
+            v3len(v3sub(p->pos, g->life_points[p->bot_target].pos)) < 5.0f) {
+            p->bot_target = rand() % g->life_point_count;
+        }
+        target = g->life_points[p->bot_target].pos;
+    }
+    float dx = target.x - p->pos.x, dz = target.z - p->pos.z;
+    float d = sqrtf(dx * dx + dz * dz);
+    if (d > 3.0f) {
+        float want = atan2f(dx, -dz);
+        float diff = want - p->yaw;
+        while (diff > PI) diff -= 2.0f * (float)PI;
+        while (diff < -PI) diff += 2.0f * (float)PI;
+        p->yaw += clampf(diff, -2.2f * dt, 2.2f * dt);
+        p->input.move_z = 0.42f;   /* civilians stroll, they do not sprint */
+        p->input.move_x = 0.0f;
+        if (fabsf(diff) > 0.7f) p->input.move_z = 0.15f;
+    } else {
+        p->input.move_z = 0.0f;
+        p->input.move_x = 0.0f;
+    }
+    if (fabsf(p->pitch) > 0.1f) p->pitch *= 0.9f;
+}
+
 static void bot_think(Game* g, Player* p, float dt) {
     if (!p->alive) return;
-    p->input.use = false;
     p->bot_think_t -= dt;
     if (p->bot_think_t > 0) return;
     p->bot_think_t = frandr(0.08f, 0.16f);
@@ -3437,7 +4439,12 @@ static void update_vehicle_use(Game* g, Player* p) {
                             v->type == 2 ? "cannon" : "plasma");
             audio_play(SFX_PICKUP_WEAPON, 0.5f, 0);
         }
+        return;
     }
+    /* No vehicle nearby: E is the world interaction key. Altis POIs take
+     * priority, then harvesting nature props for building materials. */
+    if (game_life_interact(g, p)) return;
+    if (game_harvest(g, p)) return;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3801,6 +4808,8 @@ void game_update(Game* g, float dt) {
     g->elapsed += dt;
     if (g->paused) return;
     game_update_nature(g, dt);
+    game_build_update(g, dt);
+    game_life_update(g, dt);
     if (g->match_over) g->match_over_t += dt;
     if (g->match_over && !g->rewards_granted) grant_match_rewards(g);
 
@@ -3839,6 +4848,7 @@ void game_update(Game* g, float dt) {
             if (!g->networked || g->server_mode) zombie_think(g, p, dt, g->num_players > 160);
         } else if (p->bot) {
             if (g->start_countdown > 0) { p->input.fire = false; p->input.move_x = 0; p->input.move_z = 0; }
+            else if (g->game_mode == GM_ALTIS) bot_altis_civilian(g, p, dt);
             else if (g->num_players > 96 && i >= 64) bot_think_lite(g, p, dt);
             else bot_think(g, p, dt);
         }
@@ -3949,6 +4959,12 @@ void game_render_players(Game* g, Renderer* r) {
     for (int i = 0; i < g->num_players; i++) {
         Player* p = &g->players[i];
         if (!p->active) continue;
+        /* The local player is viewed in first person from inside their own
+         * head. Drawing that body put the camera inside the head/helmet mesh,
+         * which looked like being trapped in a tiled barrel (and crouching,
+         * which lowers the head faster than the eye, appeared to free you).
+         * Hide the local body; the viewmodel and weapons are drawn separately. */
+        if (i == li) continue;
         float ddx = p->pos.x - eye.x, ddz = p->pos.z - eye.z;
         float d2 = ddx * ddx + ddz * ddz;
         if (d2 > far_draw * far_draw) continue;
@@ -4358,12 +5374,15 @@ void game_render_world(Game* g, Renderer* r, Camera* cam) {
     renderer_draw_world_static(r, g->world);
     fx_begin(r);
     game_render_nature(g, r);
+    game_render_life(g, r);
     game_render_players(g, r);
     game_render_objectives(g, r);
     game_render_projectiles(g, r);
     game_render_pickups(g, r);
     game_render_particles(g, r);
     fx_render(r);
+    game_render_builds(g, r);
+    game_render_zone(g, r);
     if (g->local_player >= 0 && g->local_player < g->num_players) {
         renderer_begin_viewmodel(r);
         game_render_viewmodel(g, r, g->time);

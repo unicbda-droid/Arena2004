@@ -135,7 +135,7 @@ void editor_shutdown(Editor* ed) {
 static void ed_viewproj(Editor* ed, Mat4* out_vp) {
     Camera* c = &ed->cam;
     Mat4 view = mat4_look_at(c->pos, v3add(c->pos, c->fwd), v3(0, 1, 0));
-    Mat4 proj = mat4_perspective(c->fov * DEG2RAD, (float)ed->vw / fmaxf((float)ed->vh, 1.0f), 0.03f, 400.0f);
+    Mat4 proj = mat4_perspective(c->fov * DEG2RAD, (float)ed->vw / fmaxf((float)ed->vh, 1.0f), 0.06f, 400.0f);
     *out_vp = mat4_mul(proj, view);
 }
 static bool ed_project(Editor* ed, Vec3 p, float* sx, float* sy, float* depth) {
@@ -207,6 +207,35 @@ static void snap_vec(Editor* ed, Vec3* p) {
     p->x = roundf(p->x / g) * g;
     p->y = roundf(p->y / g) * g;
     p->z = roundf(p->z / g) * g;
+}
+
+/* Jump the editor camera to an actor and look directly at it.  Used by the
+ * outliner (single click selects, double click focuses). */
+static void editor_focus_actor(Editor* ed, int idx) {
+    if (!ed || idx < 0 || idx >= ed->world->count) return;
+    Actor* a = &ed->world->actors[idx];
+    AABB b = world_actor_aabb(ed->world, a);
+    Vec3 c = aabb_center(b);
+    Vec3 sz = aabb_size(b);
+    float rad = fmaxf(1.0f, 0.5f * sqrtf(sz.x * sz.x + sz.y * sz.y + sz.z * sz.z));
+    Vec3 dir = ed->cam.fwd;
+    dir.y = clampf(dir.y, -0.55f, 0.55f);
+    if (v3len(dir) < 0.01f) dir = v3(0.0f, -0.18f, -1.0f);
+    dir = v3norm(dir);
+    float dist = rad * 2.6f + 5.0f;
+    Vec3 pos = v3sub(c, v3mul(dir, dist));
+    if (pos.y < c.y + 1.2f) pos.y = c.y + 1.2f;
+    Vec3 look = v3sub(c, pos);
+    if (v3len(look) < 0.001f) look = v3(0, 0, -1);
+    look = v3norm(look);
+    ed->cam.pos = pos;
+    ed->cam.yaw = atan2f(look.x, -look.z);
+    ed->cam.pitch = clampf(asinf(clampf(look.y, -1.0f, 1.0f)), -1.52f, 1.52f);
+    camera_update(&ed->cam);
+    ed->selected = idx;
+    editor_set_status(ed, "FOCUS: %s (%s)  X %.1f  Y %.1f  Z %.1f",
+                      a->name[0] ? a->name : actor_type_name(a->type),
+                      actor_type_name(a->type), a->pos.x, a->pos.y, a->pos.z);
 }
 
 static void place_actor(Editor* ed, Ray ray) {
@@ -290,6 +319,7 @@ void editor_update(Editor* ed, float dt, const EdInput* in, int w, int h) {
     if (ed->vw < 100) ed->vw = 100;
     if (ed->vh < 100) ed->vh = 100;
     if (ed->status_t > 0) ed->status_t -= dt;
+    ed->ui_time += dt;
 
     if (ed->pie_active) {
         game_update(&ed->pie_game, dt);
@@ -325,7 +355,9 @@ void editor_update(Editor* ed, float dt, const EdInput* in, int w, int h) {
         ed->cam.pitch = clampf(ed->cam.pitch, -1.52f, 1.52f);
     }
     if (ed->top_view) ed->cam.pitch = -1.52f;
-    if (in->wheel != 0 && !ed->top_view) {
+    bool over_viewport = in->mx >= ed->vx && in->mx <= ed->vx + ed->vw &&
+                         in->my >= ed->vy && in->my <= ed->vy + ed->vh;
+    if (in->wheel != 0 && !ed->top_view && over_viewport) {
         ed->cam.pos = v3add(ed->cam.pos, v3mul(ed->cam.fwd, in->wheel * 1.6f));
     }
 
@@ -353,7 +385,7 @@ void editor_update(Editor* ed, float dt, const EdInput* in, int w, int h) {
         float t = -ray.origin.y / ray.dir.y;
         if (t > 0) { ed->cursor_world = v3add(ray.origin, v3mul(ray.dir, t)); ed->cursor_valid = true; }
     }
-    bool in_view = in->mx >= ed->vx && in->mx <= ed->vx + ed->vw && in->my >= ed->vy && in->my <= ed->vy + ed->vh;
+    bool in_view = over_viewport;
     ed->hover_actor = -1;
     ed->hover_axis = -1;
     if (in_view) {
@@ -647,7 +679,7 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
     bx += 30;
     if (ui_icon_button(ui, "ed.open", ICON_FOLDER, bx, 38, 26, 24, false)) {
         editor_refresh_maps(ed);
-        ed->browser_tab = 1;
+        ed->browser_tab = 2;
         editor_set_status(ed, "Map browser — select a map and press LOAD");
     }
     bx += 30;
@@ -697,9 +729,9 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
     ui_text_right(ui, lx + lw - 10, ly + 8, "ARENA", 9, C_ACCENT);
     /* tabs */
     float ty = ly + 28;
-    const char* tabs[] = { "ACTORS", "MAPS", "MATERIALS" };
-    for (int i = 0; i < 3; i++) {
-        float tw = lw / 3.0f;
+    const char* tabs[] = { "ACTORS", "OUTLINER", "MAPS", "MATS" };
+    for (int i = 0; i < 4; i++) {
+        float tw = lw / 4.0f;
         bool sel = ed->browser_tab == i;
         ui_rect(ui, lx + i * tw, ty, tw, 24, sel ? col(0.14f, 0.20f, 0.28f, 1) : col(0.08f, 0.09f, 0.10f, 1));
         if (sel) ui_rect(ui, lx + i * tw, ty + 21, tw, 3, C_BLUE);
@@ -742,6 +774,55 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
         char ph[128]; snprintf(ph, sizeof(ph), "NEXT: %s", ed->placing ? actor_type_name(ed->place_type) : "Select an actor");
         ui_text(ui, lx + 10, cy + 8, ph, 10, ed->placing ? C_ACCENT : C_DIM);
     } else if (ed->browser_tab == 1) {
+        ui_text(ui, lx + 12, cy, "WORLD OUTLINER", 9, C_ACCENT);
+        cy += 20;
+        float list_h = lh - (cy - ly) - 30;
+        if (list_h < 24) list_h = 24;
+        int rows = (int)(list_h / 24);
+        int max_scroll = ed->world->count > rows ? ed->world->count - rows : 0;
+        if (ui_mouse_in(ui, lx + 4, cy, lw - 8, list_h)) {
+            ui->mouse_over_ui = true;
+            if (ui->in.wheel != 0) ed->outline_scroll -= ui->in.wheel * 3;
+        }
+        ed->outline_scroll = (int)clampf((float)ed->outline_scroll, 0.0f, (float)max_scroll);
+        ui_push_clip(ui, (int)lx + 4, (int)cy, (int)lw - 8, (int)list_h);
+        for (int i = 0; i < ed->world->count; i++) {
+            int vi = i - ed->outline_scroll;
+            if (vi < 0 || vi >= rows) continue;
+            Actor* a = &ed->world->actors[i];
+            float ry2 = cy + vi * 24;
+            bool hov = ui_mouse_in(ui, lx + 6, ry2, lw - 12, 24);
+            bool sel = ed->selected == i;
+            ui_rect(ui, lx + 6, ry2, lw - 12, 22, sel ? col(0.18f, 0.27f, 0.38f, 1) : (hov ? col(0.13f, 0.15f, 0.18f, 1) : col(0, 0, 0, 0)));
+            int ic = ICON_CUBE;
+            if (a->type == ACT_LIGHT) ic = ICON_LIGHT;
+            else if (a->type == ACT_PLAYER_START || a->type == ACT_NAV_POINT) ic = ICON_SPAWN;
+            else if (a->type == ACT_PICKUP) ic = ICON_PICKUP;
+            else if (a->type == ACT_JUMPPAD) ic = ICON_JUMP;
+            else if (a->type == ACT_LAVA) ic = ICON_LAVA;
+            else if (a->type == ACT_TRIGGER) ic = ICON_LAVA;
+            ui_icon(ui, ic, lx + 12, ry2 + 3, 14, sel ? C_ACCENT : C_DIM);
+            char label[96]; snprintf(label, sizeof(label), "%s", a->name[0] ? a->name : actor_type_name(a->type));
+            ui_text(ui, lx + 32, ry2 + 4, label, 10, sel ? C_WHITE : C_TEXT);
+            if (hov) {
+                ui->mouse_over_ui = true;
+                if (ui->in.pressed) {
+                    ed->selected = i;
+                    if (ed->outline_last == i && ed->ui_time - ed->outline_click_t < 0.35f) {
+                        editor_focus_actor(ed, i);
+                        ed->outline_last = -1;
+                    } else {
+                        ed->outline_last = i;
+                        ed->outline_click_t = ed->ui_time;
+                    }
+                }
+            }
+        }
+        ui_pop_clip(ui);
+        cy = ly + lh - 26;
+        char oc[64]; snprintf(oc, sizeof(oc), "%d ACTORS  //  1-CLICK SELECT  2-CLICK FOCUS", ed->world->count);
+        ui_text(ui, lx + 10, cy + 7, oc, 8, C_DIM);
+    } else if (ed->browser_tab == 2) {
         ui_text(ui, lx + 12, cy, "MAPS", 9, C_ACCENT);
         cy += 20;
         ui_push_clip(ui, (int)lx + 4, (int)cy, (int)lw - 8, (int)(lh - (cy - ly) - 68));

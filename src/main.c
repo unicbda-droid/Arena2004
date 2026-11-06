@@ -26,7 +26,39 @@
 
 enum { MODE_MENU = 0, MODE_GAME = 1, MODE_EDITOR = 2 };
 enum { PAGE_MAIN = 0, PAGE_HOST, PAGE_JOIN, PAGE_SETTINGS, PAGE_ARMORY };
+enum { SET_VIDEO = 0, SET_AUDIO, SET_CONTROLS, SET_GAMEPLAY, SET_TAB_COUNT };
+enum {
+    KB_FORWARD = 0, KB_BACK, KB_LEFT, KB_RIGHT, KB_JUMP, KB_CROUCH, KB_DODGE,
+    KB_USE, KB_FIRE, KB_ALTFIRE, KB_RELOAD, KB_RESPAWN, KB_SCORES, KB_RESTART,
+    KB_BUILD, KB_COUNT
+};
 #define APP_MAX_MAPS 48
+#define APP_RES_COUNT 7
+
+static const int app_resolutions[APP_RES_COUNT][2] = {
+    { 1280, 720 }, { 1366, 768 }, { 1600, 900 }, { 1920, 1080 },
+    { 2560, 1440 }, { 3200, 1800 }, { 3840, 2160 }
+};
+static const char* app_res_name[APP_RES_COUNT] = {
+    "1280 x 720", "1366 x 768", "1600 x 900", "1920 x 1080",
+    "2560 x 1440", "3200 x 1800", "3840 x 2160"
+};
+static const char* app_display_mode_name[3] = { "FENSTER", "BORDERLESS", "VOLLBILD" };
+static const char* app_kb_action[KB_COUNT] = {
+    "VORWAERTS", "RUECKWAERTS", "LINKS", "RECHTS", "SPRINGEN", "KAUERN", "DODGE",
+    "BENUTZEN", "FEUER", "ALT FEUER", "NACHLADEN", "RESPAWN", "SCORES", "NEUSTART",
+    "BAUEN"
+};
+static const char* app_kb_key[KB_COUNT] = {
+    "forward", "back", "left", "right", "jump", "crouch", "dodge",
+    "use", "fire", "altfire", "reload", "respawn", "scores", "restart", "build"
+};
+static const SDL_Scancode app_kb_default[KB_COUNT] = {
+    SDL_SCANCODE_W, SDL_SCANCODE_S, SDL_SCANCODE_A, SDL_SCANCODE_D,
+    SDL_SCANCODE_SPACE, SDL_SCANCODE_LCTRL, SDL_SCANCODE_LSHIFT,
+    SDL_SCANCODE_E, SDL_SCANCODE_F, SDL_SCANCODE_G, SDL_SCANCODE_R,
+    SDL_SCANCODE_RETURN, SDL_SCANCODE_TAB, SDL_SCANCODE_F5, SDL_SCANCODE_B
+};
 
 typedef struct {
     SDL_Window* win;
@@ -61,6 +93,8 @@ typedef struct {
     bool paused;
     bool show_scores;
     bool mouse_captured;
+    bool unfocused;
+    bool show_inputdbg;
     /* keyboard virtual cursor + console */
     Console console;
     bool kbd_cursor;
@@ -75,6 +109,23 @@ typedef struct {
     float fog_density;
     bool vsync;
     int opencode_pid;
+
+    /* settings (persisted in the career profile) */
+    int settings_tab;
+    float music_volume;
+    float sfx_volume;
+    bool invert_y;
+    int display_mode;       /* 0 windowed, 1 borderless, 2 fullscreen */
+    int display_index;
+    int win_w, win_h;
+    int res_index;
+    bool bloom_on;
+    float bloom_strength;
+    float exposure;
+    bool normal_maps;
+    bool aniso;
+    SDL_Scancode bind[KB_COUNT];
+    int rebind_action;      /* >= 0 while waiting for the next key */
 
     /* maps */
     char map_names[APP_MAX_MAPS][64];
@@ -122,6 +173,7 @@ typedef struct {
     /* persistent career profile (survives matches / restarts) */
     int prof_credits, prof_points;
     int prof_upg[UPG_COUNT];
+    int prof_life_cash, prof_life_bank, prof_life_ore;
     bool result_saved;
 } App;
 
@@ -217,6 +269,9 @@ static void app_profile_path(char* buf, int cap) {
 static void app_profile_load(App* a) {
     a->prof_credits = 250;
     a->prof_points = 0;
+    a->prof_life_cash = 0;
+    a->prof_life_bank = 0;
+    a->prof_life_ore = 0;
     memset(a->prof_upg, 0, sizeof(a->prof_upg));
     char path[512];
     app_profile_path(path, sizeof(path));
@@ -227,6 +282,9 @@ static void app_profile_load(App* a) {
         char key[32]; int val = 0;
         if (sscanf(line, "credits %d", &val) == 1) { a->prof_credits = val; continue; }
         if (sscanf(line, "points %d", &val) == 1) { a->prof_points = val; continue; }
+        if (sscanf(line, "lifecash %d", &val) == 1) { a->prof_life_cash = val; continue; }
+        if (sscanf(line, "lifebank %d", &val) == 1) { a->prof_life_bank = val; continue; }
+        if (sscanf(line, "lifeore %d", &val) == 1) { a->prof_life_ore = val; continue; }
         char key2[32];
         if (sscanf(line, "upg %31s %d", key2, &val) == 2) {
             for (int i = 0; i < UPG_COUNT; i++)
@@ -235,12 +293,63 @@ static void app_profile_load(App* a) {
                     if (val > game_upgrade_max(i)) val = game_upgrade_max(i);
                     a->prof_upg[i] = val;
                 }
+            continue;
+        }
+        if (sscanf(line, "bind %31s %d", key2, &val) == 2) {
+            for (int i = 0; i < KB_COUNT; i++)
+                if (!strcmp(key2, app_kb_key[i]) && val >= 0 && val < SDL_NUM_SCANCODES)
+                    a->bind[i] = (SDL_Scancode)val;
+            continue;
+        }
+        float fv = 0.0f;
+        if (sscanf(line, "video %31s %f", key2, &fv) == 2) {
+            if (!strcmp(key2, "fov")) a->fov = clampf(fv, 60.0f, 130.0f);
+            else if (!strcmp(key2, "sens")) a->sensitivity = clampf(fv, 0.05f, 10.0f);
+            else if (!strcmp(key2, "gravity")) a->gravity = clampf(fv, 1.0f, 80.0f);
+            else if (!strcmp(key2, "invert")) a->invert_y = fv != 0.0f;
+            else if (!strcmp(key2, "bloom")) a->bloom_on = fv != 0.0f;
+            else if (!strcmp(key2, "bloomstrength")) a->bloom_strength = clampf(fv, 0.0f, 2.0f);
+            else if (!strcmp(key2, "exposure")) a->exposure = clampf(fv, 0.3f, 2.5f);
+            else if (!strcmp(key2, "normalmaps")) a->normal_maps = fv != 0.0f;
+            else if (!strcmp(key2, "aniso")) a->aniso = fv != 0.0f;
+            else if (!strcmp(key2, "vsync")) a->vsync = fv != 0.0f;
+            else if (!strcmp(key2, "fps")) a->show_fps = fv != 0.0f;
+            else if (!strcmp(key2, "mode")) a->display_mode = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "monitor")) a->display_index = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "res")) a->res_index = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "width")) a->win_w = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "height")) a->win_h = (int)(fv + 0.5f);
+            continue;
+        }
+        if (sscanf(line, "audio %31s %f", key2, &fv) == 2) {
+            if (!strcmp(key2, "master")) a->volume = clampf(fv, 0.0f, 1.0f);
+            else if (!strcmp(key2, "music")) a->music_volume = clampf(fv, 0.0f, 1.0f);
+            else if (!strcmp(key2, "sfx")) a->sfx_volume = clampf(fv, 0.0f, 1.0f);
+            continue;
+        }
+        if (sscanf(line, "game %31s %f", key2, &fv) == 2) {
+            if (!strcmp(key2, "bots")) a->bots = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "skill")) a->difficulty = (int)(fv + 0.5f);
+            else if (!strcmp(key2, "fraglimit")) a->frag_limit = clampf(fv, 1.0f, 1000.0f);
+            else if (!strcmp(key2, "mode")) a->game_mode = (int)(fv + 0.5f);
+            continue;
         }
         (void)key;
     }
     fclose(f);
     if (a->prof_credits < 0) a->prof_credits = 0;
     if (a->prof_points < 0) a->prof_points = 0;
+    if (a->bots < 1) a->bots = 1;
+    if (a->bots > 7) a->bots = 7;
+    if (a->difficulty < 0) a->difficulty = 0;
+    if (a->difficulty > 6) a->difficulty = 6;
+    if (a->game_mode < 0 || a->game_mode >= GM_COUNT) a->game_mode = GM_DM;
+    if (a->display_mode < 0 || a->display_mode > 2) a->display_mode = 0;
+    if (a->display_index < 0) a->display_index = 0;
+    if (a->win_w < 640) a->win_w = 1600;
+    if (a->win_h < 360) a->win_h = 900;
+    if (a->res_index < -1 || a->res_index >= APP_RES_COUNT) a->res_index = -1;
+    a->fullscreen = a->display_mode != 0;
 }
 
 static void app_profile_save(App* a) {
@@ -252,8 +361,36 @@ static void app_profile_save(App* a) {
     fprintf(f, "# Arena2004 career profile\n");
     fprintf(f, "credits %d\n", a->prof_credits);
     fprintf(f, "points %d\n", a->prof_points);
+    fprintf(f, "lifecash %d\n", a->prof_life_cash);
+    fprintf(f, "lifebank %d\n", a->prof_life_bank);
+    fprintf(f, "lifeore %d\n", a->prof_life_ore);
     for (int i = 0; i < UPG_COUNT; i++)
         fprintf(f, "upg %s %d\n", game_upgrade_key(i), a->prof_upg[i]);
+    fprintf(f, "video fov %.2f\n", a->fov);
+    fprintf(f, "video sens %.3f\n", a->sensitivity);
+    fprintf(f, "video gravity %.2f\n", a->gravity);
+    fprintf(f, "video invert %d\n", a->invert_y ? 1 : 0);
+    fprintf(f, "video bloom %d\n", a->bloom_on ? 1 : 0);
+    fprintf(f, "video bloomstrength %.3f\n", a->bloom_strength);
+    fprintf(f, "video exposure %.3f\n", a->exposure);
+    fprintf(f, "video normalmaps %d\n", a->normal_maps ? 1 : 0);
+    fprintf(f, "video aniso %d\n", a->aniso ? 1 : 0);
+    fprintf(f, "video vsync %d\n", a->vsync ? 1 : 0);
+    fprintf(f, "video fps %d\n", a->show_fps ? 1 : 0);
+    fprintf(f, "video mode %d\n", a->display_mode);
+    fprintf(f, "video monitor %d\n", a->display_index);
+    fprintf(f, "video res %d\n", a->res_index);
+    fprintf(f, "video width %d\n", a->win_w);
+    fprintf(f, "video height %d\n", a->win_h);
+    fprintf(f, "audio master %.3f\n", a->volume);
+    fprintf(f, "audio music %.3f\n", a->music_volume);
+    fprintf(f, "audio sfx %.3f\n", a->sfx_volume);
+    fprintf(f, "game bots %d\n", a->bots);
+    fprintf(f, "game skill %d\n", a->difficulty);
+    fprintf(f, "game fraglimit %.0f\n", a->frag_limit);
+    fprintf(f, "game mode %d\n", a->game_mode);
+    for (int i = 0; i < KB_COUNT; i++)
+        fprintf(f, "bind %s %d\n", app_kb_key[i], (int)a->bind[i]);
     fclose(f);
 }
 
@@ -265,6 +402,11 @@ static void app_profile_apply(App* a) {
     p->credits = a->prof_credits;
     p->career_points = a->prof_points;
     for (int i = 0; i < UPG_COUNT; i++) p->upg[i] = a->prof_upg[i];
+    if (a->game->game_mode == GM_ALTIS) {
+        p->cash = a->prof_life_cash;
+        p->bank = a->prof_life_bank;
+        p->ore = a->prof_life_ore;
+    }
     game_player_refresh_stats(p);
     p->rank = game_rank_index(p->career_points);
     if (p->alive) p->health = game_player_max_health(p);
@@ -279,6 +421,11 @@ static void app_profile_capture(App* a) {
     a->prof_credits = p->credits;
     a->prof_points = p->career_points;
     for (int i = 0; i < UPG_COUNT; i++) a->prof_upg[i] = p->upg[i];
+    if (a->game->game_mode == GM_ALTIS) {
+        a->prof_life_cash = p->cash;
+        a->prof_life_bank = p->bank;
+        a->prof_life_ore = p->ore;
+    }
 }
 
 static void split_host_port(const char* s, char* host, int hcap, int* port) {
@@ -332,9 +479,66 @@ static bool save_screenshot(int w, int h, const char* path) {
 }
 
 /* ------------------------------------------------------------------ */
+static int app_res_index_for(int w, int h) {
+    for (int i = 0; i < APP_RES_COUNT; i++)
+        if (app_resolutions[i][0] == w && app_resolutions[i][1] == h) return i;
+    return -1;
+}
+
+/* Apply window mode / monitor / resolution / vsync. Safe to call before the
+ * renderer exists (startup) and later from the settings screen. */
+static void app_apply_video(App* a) {
+    if (!a->win) return;
+    a->fullscreen = a->display_mode != 0;
+    if (a->hidden) {
+        SDL_GL_SetSwapInterval(0);
+        return;
+    }
+    int ndisp = SDL_GetNumVideoDisplays();
+    if (ndisp < 1) ndisp = 1;
+    if (a->display_index < 0 || a->display_index >= ndisp) a->display_index = 0;
+    SDL_SetWindowFullscreen(a->win, 0);
+    if (a->display_mode == 1) {
+        SDL_SetWindowFullscreen(a->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    } else if (a->display_mode == 2) {
+        SDL_SetWindowFullscreen(a->win, SDL_WINDOW_FULLSCREEN);
+    }
+    if (a->display_mode == 0) {
+        SDL_SetWindowSize(a->win, a->win_w, a->win_h);
+        SDL_Rect b;
+        if (SDL_GetDisplayBounds(a->display_index, &b) == 0)
+            SDL_SetWindowPosition(a->win, b.x + (b.w - a->win_w) / 2,
+                                  b.y + (b.h - a->win_h) / 2);
+    }
+    SDL_GL_SetSwapInterval(a->vsync ? 1 : 0);
+    int dw = a->w, dh = a->h;
+    SDL_GL_GetDrawableSize(a->win, &dw, &dh);
+    if (dw > 0 && dh > 0) { a->w = dw; a->h = dh; }
+    if (a->r.prog_scene) {
+        renderer_resize(&a->r, a->w, a->h);
+        a->ui.w = a->w;
+        a->ui.h = a->h;
+    }
+}
+
 static void app_set_fullscreen(App* a, bool on) {
-    a->fullscreen = on;
-    SDL_SetWindowFullscreen(a->win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    a->display_mode = on ? 1 : 0;
+    app_apply_video(a);
+}
+
+static void app_reset_binds(App* a) {
+    for (int i = 0; i < KB_COUNT; i++) a->bind[i] = app_kb_default[i];
+}
+
+static void app_cycle_res(App* a, int dir) {
+    int idx = a->res_index;
+    if (idx < 0) idx = 2;
+    idx = (idx + dir + APP_RES_COUNT) % APP_RES_COUNT;
+    a->res_index = idx;
+    a->win_w = app_resolutions[idx][0];
+    a->win_h = app_resolutions[idx][1];
+    a->display_mode = 0;
+    app_apply_video(a);
 }
 
 static void capture_mouse(App* a, bool on) {
@@ -511,6 +715,8 @@ static const char* CONSOLE_HELP[] = {
     "shop | upgrade <key> | rank  RPG-Upgrades, Credits, Karriere-Rang",
     "results                      Nachkampf-Auswertung (Punkte/Credits)",
     "ambient [n|on|off]           Natur/Tiere + bis zu 1000 Ambient-NPCs",
+    "build [give n|clear|toggle]  Fortnite-Bauen: Material, Stueck, Modus",
+    "life [add n|bank n|mine n]   Altis Life: Geld, Bank, Erz, Wanted",
     "scale <5v5|32v32|64v64|128v128|256|1000|10k|30k>  Matchgroesse",
     "team [slot] <red|blue|none>  Teamzuordnung aendern",
     "mega <n> | zones [n]         PlanetSide-Zonen (bis 30000 Spieler)",
@@ -899,8 +1105,14 @@ static void app_console_set(App* a, const char* var, const char* val, bool has_v
         if (a->game) a->game->difficulty = a->difficulty;
         con_ok(a, "skill = %d", a->difficulty);
     } else if (!strcasecmp(var, "volume") || !strcasecmp(var, "vol")) {
-        if (has_val) { a->volume = clampf(con_float(val, a->volume), 0, 1); audio_set_master(a->volume); audio_set_music(a->volume * 0.5f); }
+        if (has_val) { a->volume = clampf(con_float(val, a->volume), 0, 1); audio_set_master(a->volume); }
         con_ok(a, "volume = %.2f", a->volume);
+    } else if (!strcasecmp(var, "musicvolume") || !strcasecmp(var, "music")) {
+        if (has_val) { a->music_volume = clampf(con_float(val, a->music_volume), 0, 1); audio_set_music(a->music_volume); }
+        con_ok(a, "music = %.2f", a->music_volume);
+    } else if (!strcasecmp(var, "sfxvolume") || !strcasecmp(var, "sfx")) {
+        if (has_val) { a->sfx_volume = clampf(con_float(val, a->sfx_volume), 0, 1); audio_set_sfx(a->sfx_volume); }
+        con_ok(a, "sfx = %.2f", a->sfx_volume);
     } else if (!strcasecmp(var, "sens") || !strcasecmp(var, "sensitivity") || !strcasecmp(var, "m_pitch")) {
         if (has_val) a->sensitivity = clampf(con_float(val, a->sensitivity), 0.05f, 10.0f);
         con_ok(a, "sens = %.2f", a->sensitivity);
@@ -930,11 +1142,15 @@ static void app_console_set(App* a, const char* var, const char* val, bool has_v
         if (has_val) str_copy(a->join_password, val, sizeof(a->join_password));
         con_ok(a, "join password = %s", a->join_password[0] ? "gesetzt" : "leer");
     } else if (!strcasecmp(var, "bloom")) {
-        if (has_val) a->r.bloom_strength = clampf(con_float(val, a->r.bloom_strength), 0, 2.5f);
-        con_ok(a, "bloom = %.2f", a->r.bloom_strength);
+        if (has_val) {
+            a->bloom_strength = clampf(con_float(val, a->bloom_strength), 0, 2.5f);
+            a->bloom_on = a->bloom_strength > 0.0f;
+            a->r.bloom_strength = a->bloom_strength;
+        }
+        con_ok(a, "bloom = %.2f", a->bloom_strength);
     } else if (!strcasecmp(var, "exposure")) {
-        if (has_val) a->r.exposure = clampf(con_float(val, a->r.exposure), 0.2f, 3.0f);
-        con_ok(a, "exposure = %.2f", a->r.exposure);
+        if (has_val) { a->exposure = clampf(con_float(val, a->exposure), 0.2f, 3.0f); a->r.exposure = a->exposure; }
+        con_ok(a, "exposure = %.2f", a->exposure);
     } else if (!strcasecmp(var, "fog")) {
         if (has_val && a->world) a->world->fog_density = clampf(con_float(val, a->world->fog_density), 0, 0.2f);
         con_ok(a, "fog = %.4f", a->world ? a->world->fog_density : 0.0f);
@@ -952,15 +1168,14 @@ static void app_console_set(App* a, const char* var, const char* val, bool has_v
             int w = a->w, h = a->h;
             if (val && sscanf(val, "%dx%d", &w, &h) != 2) { w = a->w; h = a->h; }
             if (w > 320 && h > 200) {
-                SDL_SetWindowSize(a->win, w, h);
-                a->w = w; a->h = h;
-                renderer_resize(&a->r, w, h);
-                a->ui.w = w; a->ui.h = h;
+                a->win_w = w; a->win_h = h;
+                a->res_index = app_res_index_for(w, h);
+                app_apply_video(a);
             }
         }
         con_ok(a, "resolution = %dx%d", a->w, a->h);
     } else {
-        con_err(a, "set: unbekannte Variable '%s' (fps, fraglimit, bots, skill, volume, sens, fov, gravity, bloom, exposure, fog, fullscreen, vsync, god, crosshair, password, res)", var);
+        con_err(a, "set: unbekannte Variable '%s' (fps, fraglimit, bots, skill, volume, music, sfx, sens, fov, gravity, bloom, exposure, fog, fullscreen, vsync, god, crosshair, password, res)", var);
     }
 }
 
@@ -1340,7 +1555,8 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
         if (!a->game || a->mode != MODE_GAME) { con_err(a, "give: kein laufendes Match"); return; }
         Player* p = &a->game->players[a->game->local_player];
         if (!a1 || !strcasecmp(a1, "all")) {
-            for (int i = 0; i < WPN_COUNT; i++) { p->has[i] = true; p->ammo[i] = weapon_defs[i].ammo_max; }
+            for (int i = 0; i < WPN_COUNT; i++) { p->has[i] = true; p->ammo[i] = weapon_defs[i].ammo_max; p->mag[i] = game_player_mag_cap(i); }
+            p->reload_timer = 0; p->reload_total = 0; p->reload_weapon = -1;
             p->health = 100; p->armor = 100;
             con_ok(a, "alle Waffen, Health und Shield");
         } else if (!strcasecmp(a1, "health")) { p->health = 199; con_ok(a, "Health 199"); }
@@ -1353,7 +1569,8 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
             else if (!strcasecmp(a1,"flak")) w = WPN_FLAK;
             else if (!strcasecmp(a1,"lightning")) w = WPN_LIGHTNING;
             if (w < 0) { con_err(a, "give: health|armor|ar|shock|rocket|flak|lightning|all"); return; }
-            p->has[w] = true; p->ammo[w] = weapon_defs[w].ammo_max; p->weapon = w;
+            p->has[w] = true; p->ammo[w] = weapon_defs[w].ammo_max; p->mag[w] = game_player_mag_cap(w); p->weapon = w;
+            p->reload_timer = 0; p->reload_total = 0; p->reload_weapon = -1;
             con_ok(a, "Waffe: %s", weapon_defs[w].name);
         }
     }
@@ -1618,6 +1835,72 @@ static void app_console_execute_depth(App* a, const char* line, int depth) {
         if (p) console_printf(&a->console, "DEINE AUSBEUTE: %d Punkte  //  %d Credits  //  %d Kills  //  %d Assists  //  Rang %s",
                               p->score_points, p->credits, p->frags, p->assists, game_rank_name(p->rank));
     }
+    else if (!strcasecmp(cmd, "build") || !strcasecmp(cmd, "bau")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "build: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        if (li < 0 || li >= g->num_players) { con_err(a, "build: kein lokaler Spieler"); return; }
+        Player* p = &g->players[li];
+        if (a1 && (!strcasecmp(a1, "give") || !strcasecmp(a1, "add"))) {
+            int n2 = a2 ? con_int(a2, 100) : 100;
+            p->mats[0] += n2; p->mats[1] += n2; p->mats[2] += n2;
+            con_ok(a, "Baumaterial +%d je Sorte (Holz %d, Stein %d, Metall %d)", n2,
+                   p->mats[0], p->mats[1], p->mats[2]);
+            return;
+        }
+        if (a1 && !strcasecmp(a1, "clear")) {
+            game_build_clear(g);
+            con_ok(a, "Alle Spielerbauten entfernt");
+            return;
+        }
+        if (a1 && (!strcasecmp(a1, "toggle") || !strcasecmp(a1, "on") || !strcasecmp(a1, "off"))) {
+            if (!strcasecmp(a1, "toggle")) game_build_toggle(p);
+            else p->build_mode = !strcasecmp(a1, "on");
+            con_ok(a, "Baumodus: %s", p->build_mode ? "an" : "aus");
+            return;
+        }
+        con_ok(a, "BAU  Holz %d  Stein %d  Metall %d  //  Stueck %s  //  Modus %s",
+               p->mats[0], p->mats[1], p->mats[2], game_build_piece_name(p->build_sel),
+               p->build_mode ? "an" : "aus");
+        console_printf(&a->console, "  build give [n] | build clear | build toggle  //  B im Spiel");
+    }
+    else if (!strcasecmp(cmd, "life") || !strcasecmp(cmd, "altis")) {
+        if (!a->game || a->mode != MODE_GAME) { con_err(a, "life: kein laufendes Match"); return; }
+        Game* g = a->game;
+        int li = g->local_player;
+        if (li < 0 || li >= g->num_players) { con_err(a, "life: kein lokaler Spieler"); return; }
+        Player* p = &g->players[li];
+        if (a1 && (!strcasecmp(a1, "add") || !strcasecmp(a1, "cash"))) {
+            int n2 = a2 ? con_int(a2, 500) : 500;
+            p->cash += n2;
+            con_ok(a, "Bargeld +%d  (Bar %d $, Bank %d $)", n2, p->cash, p->bank);
+            return;
+        }
+        if (a1 && !strcasecmp(a1, "bank")) {
+            int n2 = a2 ? con_int(a2, 500) : 500;
+            p->bank += n2;
+            con_ok(a, "Bank +%d  (Bank %d $)", n2, p->bank);
+            return;
+        }
+        if (a1 && !strcasecmp(a1, "mine")) {
+            int n2 = a2 ? con_int(a2, 5) : 5;
+            p->ore += n2;
+            con_ok(a, "Erz +%d  (%d im Rucksack)", n2, p->ore);
+            return;
+        }
+        if (a1 && !strcasecmp(a1, "wanted")) {
+            p->wanted = a2 ? con_int(a2, 0) : 0;
+            if (p->wanted < 0) p->wanted = 0;
+            if (p->wanted > 5) p->wanted = 5;
+            con_ok(a, "Wanted = %d", p->wanted);
+            return;
+        }
+        con_ok(a, "ALTIS  Bar %d $  Bank %d $  Erz %d  Wanted %d  Job %s",
+               p->cash, p->bank, p->ore, p->wanted, p->life_job ? "Lieferung" : "keiner");
+        for (int i = 0; i < g->life_point_count; i++)
+            console_printf(&a->console, "  %-16s  %.1f, %.1f, %.1f", g->life_points[i].name,
+                           g->life_points[i].pos.x, g->life_points[i].pos.y, g->life_points[i].pos.z);
+    }
     else if (!strcasecmp(cmd, "ambient") || !strcasecmp(cmd, "crowd") || !strcasecmp(cmd, "npc")) {
         if (!a->game || a->mode != MODE_GAME) { con_err(a, "ambient: kein laufendes Match"); return; }
         Game* g = a->game;
@@ -1852,10 +2135,11 @@ static void game_update_input(App* a, Game* g, float dt) {
     }
     a->was_alive = p->alive;
     float sens = 0.0021f * (a->sensitivity > 0.01f ? a->sensitivity : 1.0f);
-    bool input_locked = a->console.open;
+    float pitch_dir = a->invert_y ? 1.0f : -1.0f;
+    bool input_locked = a->console.open || a->unfocused;
     if (!a->paused && !input_locked) {
         a->look_yaw += a->dmx * sens;
-        a->look_pitch = clampf(a->look_pitch - a->dmy * sens, -1.45f, 1.45f);
+        a->look_pitch = clampf(a->look_pitch + a->dmy * sens * pitch_dir, -1.45f, 1.45f);
         /* full keyboard aiming: arrow keys turn / look */
         float klook = 2.1f * (key_down(a, SDL_SCANCODE_LSHIFT) ? 0.45f : 1.0f);
         if (key_down(a, SDL_SCANCODE_LEFT)) a->look_yaw -= klook * dt;
@@ -1865,33 +2149,79 @@ static void game_update_input(App* a, Game* g, float dt) {
     }
     PlayerInput in;
     memset(&in, 0, sizeof(in));
-    in.move_z = (key_down(a, SDL_SCANCODE_W) ? 1.0f : 0.0f) - (key_down(a, SDL_SCANCODE_S) ? 1.0f : 0.0f);
-    in.move_x = (key_down(a, SDL_SCANCODE_D) ? 1.0f : 0.0f) - (key_down(a, SDL_SCANCODE_A) ? 1.0f : 0.0f);
-    in.jump = key_down(a, SDL_SCANCODE_SPACE);
-    in.crouch = key_down(a, SDL_SCANCODE_LCTRL) || key_down(a, SDL_SCANCODE_RCTRL);
-    in.fire = (a->mb[0] || key_down(a, SDL_SCANCODE_F) || key_down(a, SDL_SCANCODE_RETURN)) && !a->paused && !input_locked;
-    in.alt_fire = (a->mb[2] || key_down(a, SDL_SCANCODE_G)) && !a->paused && !input_locked;
-    in.dodge = key_down(a, SDL_SCANCODE_LSHIFT) || key_down(a, SDL_SCANCODE_RSHIFT);
-    in.use = key_down(a, SDL_SCANCODE_E);
+    in.move_z = (key_down(a, a->bind[KB_FORWARD]) ? 1.0f : 0.0f) - (key_down(a, a->bind[KB_BACK]) ? 1.0f : 0.0f);
+    in.move_x = (key_down(a, a->bind[KB_RIGHT]) ? 1.0f : 0.0f) - (key_down(a, a->bind[KB_LEFT]) ? 1.0f : 0.0f);
+    if (getenv("A2K4_INPUTDBG") && (in.move_x != 0.0f || in.move_z != 0.0f)) {
+        static int idbg = 0;
+        if ((idbg++ % 12) == 0) {
+            printf("[input] mx=%.0f mz=%.0f F=%d B=%d L=%d R=%d pos=(%.2f,%.2f,%.2f) yaw=%.1f\n", in.move_x, in.move_z,
+                   key_down(a, a->bind[KB_FORWARD]), key_down(a, a->bind[KB_BACK]),
+                   key_down(a, a->bind[KB_LEFT]), key_down(a, a->bind[KB_RIGHT]),
+                   p->pos.x, p->pos.y, p->pos.z, a->look_yaw * RAD2DEG);
+            fflush(stdout);
+        }
+    }
+    in.jump = key_down(a, a->bind[KB_JUMP]);
+    in.crouch = key_down(a, a->bind[KB_CROUCH]);
+    in.fire = (a->mb[0] || key_down(a, a->bind[KB_FIRE])) && !a->paused && !input_locked;
+    in.alt_fire = (a->mb[2] || key_down(a, a->bind[KB_ALTFIRE])) && !a->paused && !input_locked;
+    in.reload = key_down(a, a->bind[KB_RELOAD]) && !a->paused && !input_locked;
+    in.dodge = key_down(a, a->bind[KB_DODGE]);
+    in.use = key_down(a, a->bind[KB_USE]);
+    /* manual respawn / unstuck. The server is authoritative in online play. */
+    if (!a->paused && !input_locked && !g->demo_mode && a->key_edge[a->bind[KB_RESPAWN]] &&
+        (!g->networked || g->server_mode)) {
+        game_respawn(g, p);
+        if (p->alive) {
+            a->was_alive = true;
+            a->look_yaw = p->yaw;
+            a->look_pitch = 0;
+            game_announce(g, "RESPAWN", col3(1.0f, 0.72f, 0.2f), 1.2f);
+        }
+    }
     in.yaw = a->look_yaw;
     in.pitch = a->look_pitch;
     in.switch_weapon = -1;
     if (a->paused || input_locked) {
-        in.fire = in.alt_fire = in.jump = in.dodge = in.crouch = in.use = false;
+        in.fire = in.alt_fire = in.jump = in.dodge = in.crouch = in.use = in.reload = false;
         in.move_x = in.move_z = 0;
         in.yaw = p->yaw;
         in.pitch = p->pitch;
     }
-    /* weapon selection */
-    if (!input_locked) for (int i = 0; i < WPN_COUNT; i++) {
-        if (a->key_edge[SDL_SCANCODE_1 + i] && p->has[i]) p->weapon = i;
+    /* Build mode (Fortnite): B toggles, 1/2/3 pick wall/floor/ramp, wheel
+     * cycles wood/stone/metal, R rotates, fire places. */
+    if (!input_locked && p->alive && a->key_edge[a->bind[KB_BUILD]] &&
+        (!g->networked || g->server_mode)) {
+        game_build_toggle(p);
+        if (p->id == g->local_player) {
+            if (p->build_mode) game_pickup_msg(g, "BAUMODUS AN - 1 Wand  2 Boden  3 Rampe  R drehen  B aus");
+            else game_pickup_msg(g, "BAUMODUS AUS");
+        }
     }
-    if (!input_locked && a->wheel != 0) {
-        int dir = a->wheel > 0 ? 1 : -1;
-        int w = p->weapon;
-        for (int k = 0; k < WPN_COUNT; k++) {
-            w = (w + dir + WPN_COUNT) % WPN_COUNT;
-            if (p->has[w]) { p->weapon = w; break; }
+    if (p->build_mode && p->alive) {
+        if (!input_locked) {
+            if (a->key_edge[SDL_SCANCODE_1]) game_build_select(p, 0);
+            if (a->key_edge[SDL_SCANCODE_2]) game_build_select(p, 1);
+            if (a->key_edge[SDL_SCANCODE_3]) game_build_select(p, 2);
+            if (a->key_edge[a->bind[KB_RELOAD]]) game_build_rotate(p);
+            if (a->wheel != 0) game_build_material(p, a->wheel > 0 ? 1 : -1);
+            if (a->key_edge[a->bind[KB_RELOAD]]) p->fire_timer = 0.05f;
+        }
+        a->wheel = 0;
+        in.reload = false;
+        in.switch_weapon = -1;
+    } else if (!input_locked) {
+        /* weapon selection */
+        for (int i = 0; i < WPN_COUNT; i++) {
+            if (a->key_edge[SDL_SCANCODE_1 + i] && p->has[i]) p->weapon = i;
+        }
+        if (a->wheel != 0) {
+            int dir = a->wheel > 0 ? 1 : -1;
+            int w = p->weapon;
+            for (int k = 0; k < WPN_COUNT; k++) {
+                w = (w + dir + WPN_COUNT) % WPN_COUNT;
+                if (p->has[w]) { p->weapon = w; break; }
+            }
         }
     }
     a->game->local_player = li;
@@ -1917,6 +2247,11 @@ static void game_frame(App* a, float dt) {
         g->paused = false;
     }
     game_update_input(a, g, dt);
+    g->fov = a->fov > 20.0f ? a->fov : 90.0f;
+    g->gravity = a->gravity;
+    a->r.bloom_strength = a->bloom_on ? a->bloom_strength : 0.0f;
+    a->r.exposure = a->exposure;
+    a->r.normal_strength = a->normal_maps ? 1.0f : 0.0f;
     if (!a->paused) game_update(g, dt);
     g->fps = a->fps;
     g->ping = a->net ? a->net->ping : 0;
@@ -1933,11 +2268,12 @@ static void game_frame(App* a, float dt) {
         app_profile_save(a);
     }
     if (!a->console.open) {
-        if (g->match_over && a->key_edge[SDL_SCANCODE_F5]) {
+        if (a->key_edge[SDL_SCANCODE_F3]) a->show_inputdbg = !a->show_inputdbg;
+        if (g->match_over && a->key_edge[a->bind[KB_RESTART]]) {
             game_reset(g);
             a->was_alive = false;
         }
-        if (a->key_edge[SDL_SCANCODE_F5] && !g->match_over) {
+        if (a->key_edge[a->bind[KB_RESTART]] && !g->match_over) {
             game_reset(g);
             a->was_alive = false;
             app_status(a, "Match neu gestartet");
@@ -1957,7 +2293,7 @@ static void game_frame(App* a, float dt) {
             return;
         }
     }
-    a->show_scores = !a->console.open && key_down(a, SDL_SCANCODE_TAB);
+    a->show_scores = !a->console.open && key_down(a, a->bind[KB_SCORES]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2006,6 +2342,151 @@ static void editor_frame(App* a, float dt) {
 }
 
 /* ------------------------------------------------------------------ */
+static void draw_settings_page(App* a, Ui* ui) {
+    int h = a->h;
+    Color dim = col(0.52f, 0.58f, 0.66f, 1);
+    Color txt = col(0.92f, 0.95f, 1.0f, 1);
+    Color head = col(0.98f, 0.62f, 0.16f, 1);
+    ui_text(ui, 60, 148, "EINSTELLUNGEN", 22, col(0.95f, 0.97f, 1, 1));
+
+    static const char* tabs[SET_TAB_COUNT] = { "VIDEO", "AUDIO", "STEUERUNG", "GAMEPLAY" };
+    for (int i = 0; i < SET_TAB_COUNT; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "set.tab.%d", i);
+        if (ui_button(ui, id, tabs[i], 60 + i * 120, 190, 114, 30, a->settings_tab == i ? 1 : 0))
+            a->settings_tab = i;
+    }
+    ui_rect(ui, 60, 226, 474, 1, col(0.20f, 0.26f, 0.33f, 1));
+
+    char b[160];
+    float y = 242;
+
+    if (a->settings_tab == SET_VIDEO) {
+        int ndisp = SDL_GetNumVideoDisplays();
+        if (ndisp < 1) ndisp = 1;
+        const char* dn = SDL_GetDisplayName(a->display_index);
+        snprintf(b, sizeof(b), "MONITOR %d/%d   %s", a->display_index + 1, ndisp, dn ? dn : "Standard");
+        if (ui_button(ui, "set.mon", b, 60, y, 400, 28, 0)) {
+            a->display_index = (a->display_index + 1) % ndisp;
+            app_apply_video(a);
+        }
+        y += 36;
+        snprintf(b, sizeof(b), "ANZEIGE   %s", app_display_mode_name[a->display_mode]);
+        if (ui_button(ui, "set.dmode", b, 60, y, 400, 28, 0)) {
+            a->display_mode = (a->display_mode + 1) % 3;
+            app_apply_video(a);
+        }
+        y += 36;
+        if (a->display_mode == 0) {
+            ui_text(ui, 60, y, "AUFLOESUNG", 9, head);
+            const char* rn = a->res_index >= 0 ? app_res_name[a->res_index] : "BENUTZERDEFINIERT";
+            ui_text(ui, 60, y + 15, rn, 14, txt);
+            if (ui_button(ui, "set.rprev", "<", 300, y + 8, 32, 26, 0)) app_cycle_res(a, -1);
+            if (ui_button(ui, "set.rnext", ">", 338, y + 8, 32, 26, 0)) app_cycle_res(a, 1);
+        } else {
+            ui_text(ui, 60, y, "AUFLOESUNG", 9, head);
+            ui_text(ui, 60, y + 15, "DESKTOP-AUFLOESUNG DES MONITORS", 12, dim);
+        }
+        y += 46;
+        float fov = a->fov;
+        if (ui_slider(ui, "set.fov", "SICHTFELD (FOV)", 60, y, 400, 22, &fov, 70, 130)) a->fov = fov;
+        y += 36;
+        if (ui_toggle(ui, "set.vsync", "VSYNC", 60, y, 200, 26, &a->vsync))
+            SDL_GL_SetSwapInterval(a->vsync ? 1 : 0);
+        y += 34;
+        if (ui_toggle(ui, "set.bloom", "BLOOM", 60, y, 200, 26, &a->bloom_on))
+            a->r.bloom_strength = a->bloom_on ? a->bloom_strength : 0.0f;
+        y += 34;
+        if (ui_slider(ui, "set.bloomstr", "BLOOM STAERKE", 60, y, 400, 22, &a->bloom_strength, 0.0f, 1.6f))
+            if (a->bloom_on) a->r.bloom_strength = a->bloom_strength;
+        y += 36;
+        if (ui_toggle(ui, "set.normal", "NORMAL MAPS", 60, y, 200, 26, &a->normal_maps))
+            a->r.normal_strength = a->normal_maps ? 1.0f : 0.0f;
+        y += 34;
+        if (ui_slider(ui, "set.exposure", "BELICHTUNG", 60, y, 400, 22, &a->exposure, 0.5f, 2.0f))
+            a->r.exposure = a->exposure;
+        y += 36;
+        ui_toggle(ui, "set.fps", "FPS ANZEIGEN", 60, y, 240, 26, &a->show_fps);
+        y += 36;
+        snprintf(b, sizeof(b), "ANISOTROPES FILTERN   %.0fx", texture_aniso_max());
+        ui_text(ui, 60, y + 4, b, 11, col(0.55f, 0.80f, 0.62f, 1));
+        y += 26;
+        ui_text(ui, 60, y, "Normal Maps: relief detail on floors, walls and props.", 10, dim);
+    } else if (a->settings_tab == SET_AUDIO) {
+        ui_text(ui, 60, y, "LAUTSTAERKE", 10, head);
+        y += 20;
+        if (ui_slider(ui, "set.master", "MASTER", 60, y, 400, 22, &a->volume, 0, 1)) audio_set_master(a->volume);
+        y += 42;
+        if (ui_slider(ui, "set.musicv", "MUSIK", 60, y, 400, 22, &a->music_volume, 0, 1)) audio_set_music(a->music_volume);
+        y += 42;
+        if (ui_slider(ui, "set.sfxv", "EFFEKTE / WAFFEN", 60, y, 400, 22, &a->sfx_volume, 0, 1)) audio_set_sfx(a->sfx_volume);
+        y += 50;
+        if (ui_button(ui, "set.audiotest", "TON TEST", 60, y, 180, 32, 0))
+            audio_play(SFX_PICKUP_WEAPON, 0.7f, 0.0f);
+        y += 44;
+        snprintf(b, sizeof(b), "AUDIO-GERAET: %s", audio_active() ? "AKTIV" : "STUMM / NICHT VERFUEGBAR");
+        ui_text(ui, 60, y, b, 11, audio_active() ? col(0.55f, 0.85f, 0.62f, 1) : col(0.85f, 0.5f, 0.4f, 1));
+        y += 22;
+        ui_text(ui, 60, y, "Musik und Effekte werden prozedural erzeugt - keine externen Audiodateien.", 10, dim);
+    } else if (a->settings_tab == SET_CONTROLS) {
+        float sens = a->sensitivity;
+        if (ui_slider(ui, "set.sens", "MAUS-EMPFINDLICHKEIT", 60, y, 400, 22, &sens, 0.1f, 3.0f)) a->sensitivity = sens;
+        y += 34;
+        ui_toggle(ui, "set.invert", "MAUS Y UMDREHEN", 60, y, 260, 26, &a->invert_y);
+        y += 40;
+        ui_text(ui, 60, y, "TASTENBELEGUNG", 10, head);
+        y += 22;
+        int rows = (KB_COUNT + 1) / 2;
+        for (int i = 0; i < KB_COUNT; i++) {
+            int col_i = i / rows;
+            int row_i = i % rows;
+            float bx = 60 + col_i * 240;
+            float by = y + row_i * 29;
+            ui_text(ui, bx, by + 6, app_kb_action[i], 10, col(0.72f, 0.77f, 0.84f, 1));
+            char id[32];
+            snprintf(id, sizeof(id), "set.bind.%d", i);
+            const char* kn = a->rebind_action == i ? "TASTE DRUECKEN..." : SDL_GetScancodeName(a->bind[i]);
+            char kl[40];
+            snprintf(kl, sizeof(kl), "%s", kn && kn[0] ? kn : "?");
+            if (ui_button(ui, id, kl, bx + 118, by, 110, 24, a->rebind_action == i ? 1 : 0))
+                a->rebind_action = i;
+        }
+        y += rows * 29 + 8;
+        if (ui_button(ui, "set.bindreset", "STANDARD-TASTEN", 60, y, 200, 30, 0)) {
+            app_reset_binds(a);
+            a->rebind_action = -1;
+        }
+        y += 38;
+        ui_text(ui, 60, y, "Taste anklicken, dann die neue Taste druecken. ESC bricht ab.", 10, dim);
+    } else {
+        float bots = (float)a->bots;
+        if (ui_slider(ui, "set.bots", "BOTS", 60, y, 400, 22, &bots, 1, 7)) a->bots = (int)(bots + 0.5f);
+        y += 40;
+        float diff = (float)a->difficulty;
+        if (ui_slider(ui, "set.diff", "BOT-SKILL", 60, y, 400, 22, &diff, 0, 6)) a->difficulty = (int)(diff + 0.5f);
+        y += 40;
+        if (ui_slider(ui, "set.frags", "FRAG-LIMIT", 60, y, 400, 22, &a->frag_limit, 5, 100)) {}
+        y += 40;
+        if (ui_slider(ui, "set.grav", "SCHWERKRAFT", 60, y, 400, 22, &a->gravity, 6, 40)) {}
+        y += 40;
+        snprintf(b, sizeof(b), "SPIELMODUS   %s", game_mode_name(a->game_mode));
+        if (ui_button(ui, "set.gmode", b, 60, y, 400, 30, 0))
+            a->game_mode = (a->game_mode + 1) % GM_COUNT;
+        y += 42;
+        if (ui_button(ui, "set.armory", "ARMORY & KARRIERE", 60, y, 200, 30, 0)) a->page = PAGE_ARMORY;
+        y += 44;
+        ui_text(ui, 60, y, "Bots, Skill, Limit und Modus gelten beim naechsten Match-Start.", 10, dim);
+    }
+
+    if (ui_button(ui, "set.back", "ZURUECK", 60, (float)h - 104, 200, 38, 0)) {
+        a->rebind_action = -1;
+        app_profile_save(a);
+        a->page = PAGE_MAIN;
+    }
+    ui_text(ui, 60, (float)h - 54, "Einstellungen werden automatisch im Profil gespeichert.", 10, dim);
+}
+
+/* ------------------------------------------------------------------ */
 static void draw_menu(App* a, Ui* ui) {
     int w = a->w, h = a->h;
     float accent = 0.98f;
@@ -2017,20 +2498,29 @@ static void draw_menu(App* a, Ui* ui) {
     /* logo */
     ui_rect(ui, 58, 58, 42, 42, col(accent, 0.62f, 0.16f, 1.0f));
     ui_tri(ui, v2(68, 68), v2(68, 90), v2(90, 79), col(0.03f, 0.04f, 0.05f, 1));
-    ui_text(ui, 116, 52, "ARENA", 46, col(0.95f, 0.97f, 1.0f, 1));
-    ui_text(ui, 116, 94, "2004", 26, col(accent, 0.62f, 0.16f, 1));
-    ui_text(ui, 60, 120, "OPENGL ARENA DEATHMATCH", 11, col(0.55f, 0.62f, 0.72f, 1));
+    ui_text(ui, 116, 52, "AFORTNITE", 42, col(0.95f, 0.97f, 1.0f, 1));
+    ui_text(ui, 116, 90, "BATTLE ROYALE", 20, col(accent, 0.62f, 0.16f, 1));
+    ui_text(ui, 60, 120, "BUILDEN WIE FORTNITE  //  ALTIS LIFE RPG", 11, col(0.55f, 0.62f, 0.72f, 1));
 
     if (a->page == PAGE_MAIN) {
         float y = 184;
-        if (ui_button(ui, "menu.play", "DEATHMATCH  (vs BOTS)", 60, y, 430, 44, 1)) {
+        char pb[96];
+        snprintf(pb, sizeof(pb), "%s  (vs BOTS)", game_mode_name(a->game_mode));
+        if (ui_button(ui, "menu.play", pb, 60, y, 430, 44, 1)) {
             a->mode = MODE_GAME;
             app_start_game(a, false, a->bots);
         }
         y += 54;
-        if (ui_button(ui, "menu.demo", "DEMO MATCH  (BOTS ONLY)", 60, y, 430, 38, 0)) {
+        if (ui_button(ui, "menu.battle", "AFORTNITE  //  BATTLE ROYALE + BUILD", 60, y, 430, 38, 0)) {
+            a->game_mode = GM_BATTLE_ROYALE;
             a->mode = MODE_GAME;
-            app_start_game(a, true, a->bots + 1);
+            app_start_game(a, false, a->bots);
+        }
+        y += 48;
+        if (ui_button(ui, "menu.altis", "ALTIS LIFE RPG  //  ARMA 3 ROLEPLAY", 60, y, 430, 38, 0)) {
+            a->game_mode = GM_ALTIS;
+            a->mode = MODE_GAME;
+            app_start_game(a, false, a->bots);
         }
         y += 48;
         if (ui_button(ui, "menu.host", "HOST ONLINE GAME", 60, y, 210, 40, 0)) {
@@ -2241,22 +2731,7 @@ static void draw_menu(App* a, Ui* ui) {
         ui_text(ui, 230, y + 22, "TIPP: Im laufenden Match geht das auch per Konsole: shop / upgrade <key>", 9,
                 col(0.5f, 0.55f, 0.62f, 1));
     } else {
-        ui_text(ui, 60, 162, "SETTINGS", 20, col(0.95f, 0.97f, 1, 1));
-        float y = 210;
-        float bots = (float)a->bots;
-        if (ui_slider(ui, "set.bots", "BOTS", 60, y, 330, 22, &bots, 1, 7)) a->bots = (int)(bots + 0.5f);
-        y += 46;
-        float diff = (float)a->difficulty;
-        if (ui_slider(ui, "set.diff", "BOT SKILL", 60, y, 330, 22, &diff, 0, 6)) a->difficulty = (int)(diff + 0.5f);
-        y += 46;
-        if (ui_slider(ui, "set.frags", "FRAG LIMIT", 60, y, 330, 22, &a->frag_limit, 5, 50)) {}
-        y += 46;
-        if (ui_slider(ui, "set.vol", "MASTER VOLUME", 60, y, 330, 22, &a->volume, 0, 1)) audio_set_master(a->volume);
-        y += 56;
-        if (ui_toggle(ui, "set.full", "FULLSCREEN (F11)", 60, y, 260, 26, &a->fullscreen))
-            app_set_fullscreen(a, a->fullscreen);
-        if (ui_button(ui, "set.back", "ZURUECK", 60, y + 48, 200, 38, 0)) a->page = PAGE_MAIN;
-        ui_text(ui, 60, (float)h - 80, "Aenderungen gelten fuer das naechste Match.", 10, col(0.55f, 0.62f, 0.72f, 1));
+        draw_settings_page(a, ui);
     }
 }
 
@@ -2326,6 +2801,30 @@ static void render_menu(App* a) {
 static void render_game(App* a) {
     Camera cam;
     game_get_camera(a->game, &cam);
+    if (getenv("A2K4_CAMDBG")) {
+        static int dbg_n = 0;
+        if ((dbg_n++ % 30) == 0) {
+            Ray r; RayHit h; bool hit;
+            r.origin = cam.pos; r.dir = cam.fwd;
+            hit = world_raycast(a->game->world, r, 80.0f, true, &h);
+            printf("[camdbg] t=%.1f demo=%d lp=%d bot=%d pos=(%.2f,%.2f,%.2f) yaw=%.0f pitch=%.0f fov=%.0f",
+                   a->game->time, a->game->demo_mode, a->game->local_player,
+                   a->game->players[a->game->local_player].bot,
+                   cam.pos.x, cam.pos.y, cam.pos.z,
+                   cam.yaw * RAD2DEG, cam.pitch * RAD2DEG, cam.fov);
+            if (hit && h.actor >= 0 && h.actor < a->game->world->count) {
+                Actor* ha = &a->game->world->actors[h.actor];
+                printf(" look=%s d=%.2f", ha->name[0] ? ha->name : actor_type_name(ha->type), h.t);
+            } else printf(" look=none");
+            for (int i = 0; i < a->game->world->count; i++) {
+                Actor* sa = &a->game->world->actors[i];
+                if (!world_actor_solid(sa)) continue;
+                if (aabb_contains(world_actor_aabb(a->game->world, sa), cam.pos))
+                    printf(" INSIDE=%s", sa->name[0] ? sa->name : actor_type_name(sa->type));
+            }
+            printf("\n"); fflush(stdout);
+        }
+    }
     clear_scene(&a->r);
     renderer_begin(&a->r, cam, a->game->world, 0, 0, a->w, a->h, a->game->time);
     game_collect_lights(a->game, &a->r);
@@ -2405,6 +2904,41 @@ static void draw_virtual_cursor(App* a, Ui* ui) {
     ui_rect_outline(ui, x - 4, y - 4, 24, 28, col(0.98f, 0.62f, 0.16f, 0.35f), 1);
 }
 
+static void draw_input_overlay(App* a, Ui* ui) {
+    Game* g = a->game;
+    if (!g || g->local_player < 0 || g->local_player >= g->num_players) return;
+    Player* p = &g->players[g->local_player];
+    float x = 22, y = 96, w = 348, h = 150;
+    ui_rect(ui, x, y, w, h, col(0.02f, 0.03f, 0.05f, 0.82f));
+    ui_rect(ui, x, y, w, 2, col(0.98f, 0.62f, 0.16f, 1));
+    ui_text(ui, x + 10, y + 8, "F3  INPUT DEBUG", 10, col(0.98f, 0.62f, 0.16f, 1));
+    const char* names[KB_COUNT] = { "FWD", "BACK", "LEFT", "RIGHT", "JUMP", "CROUCH", "DODGE",
+                                    "USE", "FIRE", "ALT", "RELOAD", "RESPAWN", "SCORES", "RESTART" };
+    float yy = y + 26;
+    for (int i = 0; i < KB_COUNT; i++) {
+        float cx = x + 10 + (i % 4) * 84;
+        float cy = yy + (i / 4) * 15;
+        bool dn = key_down(a, a->bind[i]);
+        char kb[48];
+        snprintf(kb, sizeof(kb), "%s %s", names[i], dn ? "ON" : "-");
+        ui_text(ui, cx, cy, kb, 8, dn ? col(0.55f, 0.95f, 0.6f, 1) : col(0.45f, 0.5f, 0.58f, 1));
+    }
+    char b[160];
+    snprintf(b, sizeof(b), "MOVE %.1f / %.1f   VEL %.1f %.1f %.1f   %s",
+             p->input.move_x, p->input.move_z, p->vel.x, p->vel.y, p->vel.z,
+             p->grounded ? "GROUND" : "AIR");
+    ui_text(ui, x + 10, y + 78, b, 9, col(0.85f, 0.9f, 1.0f, 1));
+    snprintf(b, sizeof(b), "POS %.1f %.1f %.1f   YAW %.0f   PITCH %.0f",
+             p->pos.x, p->pos.y, p->pos.z, p->yaw * RAD2DEG, p->pitch * RAD2DEG);
+    ui_text(ui, x + 10, y + 94, b, 9, col(0.7f, 0.76f, 0.85f, 1));
+    snprintf(b, sizeof(b), "SENS %.2f   INVERT %s   MOUSE %s   FOCUS %s",
+             a->sensitivity, a->invert_y ? "Y" : "N",
+             a->mouse_captured ? "CAPTURED" : "FREE", a->unfocused ? "LOST" : "OK");
+    ui_text(ui, x + 10, y + 110, b, 9, col(0.7f, 0.76f, 0.85f, 1));
+    if (p->hit_wall_last_frame)
+        ui_text(ui, x + 10, y + 126, "WALL CONTACT", 9, col(0.95f, 0.55f, 0.35f, 1));
+}
+
 static void app_render(App* a) {
     if (a->mode == MODE_MENU) render_menu(a);
     else if (a->mode == MODE_GAME) render_game(a);
@@ -2425,6 +2959,7 @@ static void app_render(App* a) {
         draw_menu(a, &a->ui);
     } else if (a->mode == MODE_GAME) {
         hud_draw(&a->ui, a->game, a->w, a->h);
+        if (a->show_inputdbg) draw_input_overlay(a, &a->ui);
         if (a->show_scores) hud_scoreboard(&a->ui, a->game, a->w, a->h);
         if (a->net) {
             const char* st = net_status(a->net);
@@ -2463,6 +2998,16 @@ static void handle_events(App* a) {
                 a->h = e.window.data2;
                 renderer_resize(&a->r, a->w, a->h);
                 a->ui.w = a->w; a->ui.h = a->h;
+            } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                       e.window.event == SDL_WINDOWEVENT_HIDDEN) {
+                a->unfocused = true;
+                a->dmx = a->dmy = 0;
+                a->mb[0] = a->mb[1] = a->mb[2] = false;
+                a->kbd_click_down = false;
+                capture_mouse(a, false);
+            } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                a->unfocused = false;
+                if (a->mode == MODE_GAME && !a->paused) capture_mouse(a, true);
             }
             break;
         case SDL_MOUSEMOTION:
@@ -2479,6 +3024,12 @@ static void handle_events(App* a) {
             a->my = (float)e.motion.y;
             break;
         case SDL_MOUSEBUTTONDOWN:
+            /* A real mouse click always takes over from the virtual cursor.
+             * Without this the click was evaluated at the last arrow-key
+             * cursor position instead of under the physical pointer. */
+            a->kbd_cursor = false;
+            a->mx = (float)e.button.x;
+            a->my = (float)e.button.y;
             if (e.button.button >= 1 && e.button.button <= 3) {
                 int b = e.button.button - 1;
                 a->mb[b] = true;
@@ -2486,6 +3037,9 @@ static void handle_events(App* a) {
             }
             break;
         case SDL_MOUSEBUTTONUP:
+            a->kbd_cursor = false;
+            a->mx = (float)e.button.x;
+            a->my = (float)e.button.y;
             if (e.button.button >= 1 && e.button.button <= 3) {
                 int b = e.button.button - 1;
                 a->mb[b] = false;
@@ -2506,6 +3060,15 @@ static void handle_events(App* a) {
             }
             break;
         case SDL_KEYDOWN:
+            if (a->rebind_action >= 0) {
+                if (e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) a->rebind_action = -1;
+                else {
+                    a->bind[a->rebind_action] = e.key.keysym.scancode;
+                    a->rebind_action = -1;
+                    app_profile_save(a);
+                }
+                break;
+            }
             if (e.key.keysym.scancode == SDL_SCANCODE_F11) {
                 app_set_fullscreen(a, !a->fullscreen);
                 break;
@@ -2540,15 +3103,31 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     a->bots = 4;
     a->difficulty = 3;
     a->frag_limit = 20;
-    a->game_mode = GM_DM;
+    a->game_mode = GM_BATTLE_ROYALE;
     a->mega_total = 0;
     a->volume = 0.8f;
+    a->music_volume = 0.45f;
+    a->sfx_volume = 0.9f;
     a->show_fps = true;
     a->sensitivity = 1.0f;
     a->fov = 90.0f;
     a->gravity = 24.0f;
     a->kbd_click_allowed = true;
     a->vsync = true;
+    a->settings_tab = SET_VIDEO;
+    a->invert_y = false;
+    a->bloom_on = true;
+    a->bloom_strength = 0.55f;
+    a->exposure = 1.08f;
+    a->normal_maps = true;
+    a->aniso = true;
+    a->display_mode = fullscreen ? 1 : 0;
+    a->display_index = 0;
+    a->win_w = w;
+    a->win_h = h;
+    a->res_index = app_res_index_for(w, h);
+    a->rebind_action = -1;
+    app_reset_binds(a);
     a->running = true;
     a->hidden = hidden;
     a->fullscreen = fullscreen;
@@ -2564,6 +3143,14 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     str_copy(a->join_lobby_port, "7777", sizeof(a->join_lobby_port));
     str_copy(a->join_code, "", sizeof(a->join_code));
     app_profile_load(a);
+    if (fullscreen) a->display_mode = 1;
+    if (a->res_index >= 0) {
+        a->win_w = app_resolutions[a->res_index][0];
+        a->win_h = app_resolutions[a->res_index][1];
+    } else {
+        a->res_index = -1;
+    }
+    a->fullscreen = a->display_mode != 0;
     a->join_via_lobby = false;
     a->host_via_lobby = false;
     console_init(&a->console);
@@ -2582,9 +3169,8 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
     if (hidden) flags |= SDL_WINDOW_HIDDEN;
-    if (fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-    a->win = SDL_CreateWindow("Arena2004 - OpenGL Arena FPS", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                              w, h, flags);
+    a->win = SDL_CreateWindow("AFortnite Battle Royale - OpenGL Arena FPS", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                              a->win_w, a->win_h, flags);
     if (!a->win) { fprintf(stderr, "[sdl] window failed: %s\n", SDL_GetError()); return false; }
     a->gl = SDL_GL_CreateContext(a->win);
     if (!a->gl) { fprintf(stderr, "[gl] context failed: %s\n", SDL_GetError()); return false; }
@@ -2593,15 +3179,23 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     if (err != GLEW_OK) { fprintf(stderr, "[glew] %s\n", glewGetErrorString(err)); return false; }
     while (glGetError() != GL_NO_ERROR) {}
     if (getenv("A2K4_GLDEBUG")) fprintf(stderr, "[gl] after glew clear\n");
-    SDL_GL_SetSwapInterval(1);
+    texture_aniso_init();
+    fprintf(stderr, "[gl] anisotropic filtering: %.0fx%s\n", texture_aniso_max(),
+            texture_aniso_max() > 1.0f ? "" : " (unsupported)");
+    app_apply_video(a);
     SDL_ShowCursor(SDL_TRUE);
 
-    if (!renderer_init(&a->r, w, h)) return false;
+    if (!renderer_init(&a->r, a->w, a->h)) return false;
     if (getenv("A2K4_GLDEBUG")) { GLenum e = glGetError(); if (e) fprintf(stderr, "[gl] renderer_init 0x%x\n", e); }
-    if (!ui_init(&a->ui, "assets/fonts/DejaVuSans.ttf", w, h)) return false;
+    if (!ui_init(&a->ui, "assets/fonts/DejaVuSans.ttf", a->w, a->h)) return false;
     if (getenv("A2K4_GLDEBUG")) { GLenum e = glGetError(); if (e) fprintf(stderr, "[gl] ui_init 0x%x\n", e); }
+    a->r.bloom_strength = a->bloom_on ? a->bloom_strength : 0.0f;
+    a->r.exposure = a->exposure;
+    a->r.normal_strength = a->normal_maps ? 1.0f : 0.0f;
     audio_init();
-    audio_set_music(a->volume * 0.5f);
+    audio_set_master(a->volume);
+    audio_set_sfx(a->sfx_volume);
+    audio_set_music(a->music_volume);
     audio_music(MUS_MENU);
 
     plat_ensure_dir("shots");
@@ -2610,10 +3204,20 @@ static bool app_init(App* a, int w, int h, bool hidden, bool fullscreen) {
     if (!a->world) return false;
     world_default_deck17(a->world);
     {
+        /* The authored map file is the source of truth. Previously the game
+         * only wrote the default map when it was missing and then always kept
+         * the procedural copy in memory, so every fix made to the .map file
+         * (spawn points, layouts) was silently ignored at runtime. */
         const char* def = "maps/DM-Deck17.map";
         FILE* f = fopen(def, "rb");
-        if (!f) world_save(a->world, def);
-        else fclose(f);
+        if (!f) {
+            world_save(a->world, def);
+        } else {
+            fclose(f);
+            World tmp;
+            if (world_load(&tmp, def)) { *a->world = tmp; }
+            else { fprintf(stderr, "[world] could not load %s, using procedural default\n", def); }
+        }
     }
     app_scan_maps(a);
     a->game = calloc(1, sizeof(Game));
@@ -2801,6 +3405,50 @@ static void run_selftest(App* a) {
         }
     }
 
+    /* deterministic reload test: manual reload fills the magazine, firing an
+     * empty magazine starts a reload without consuming reserve ammo. */
+    bool reload_ok = false;
+    {
+        Game* g = a->game;
+        int pi = (g->local_player >= 0 && g->local_player < g->num_players) ? g->local_player : 0;
+        Player* p = &g->players[pi];
+        Player saved = *p;
+        static bool saved_active[MAX_PLAYERS];
+        for (int i = 0; i < g->num_players; i++) saved_active[i] = g->players[i].active;
+        for (int i = 0; i < g->num_players; i++) if (i != pi) g->players[i].active = false;
+        p->active = true; p->bot = false; p->alive = true;
+        p->health = 100.0f; p->protection = 999.0f; p->respawn_timer = 0.0f;
+        p->weapon = WPN_AR; p->has[WPN_AR] = true;
+        p->ammo[WPN_AR] = 45;
+        p->mag[WPN_AR] = game_player_mag_cap(WPN_AR) - 5;
+        p->reload_timer = 0.0f; p->reload_total = 0.0f; p->reload_weapon = -1;
+        p->fire_timer = 0.0f;
+        memset(&p->input, 0, sizeof(p->input));
+        p->input.reload = true;
+        game_update(g, 1.0f / 60.0f);
+        bool started = p->reload_timer > 0.0f && p->reload_weapon == WPN_AR;
+        p->input.reload = false;
+        for (int f = 0; f < 120; f++) {
+            memset(&p->input, 0, sizeof(p->input));
+            game_update(g, 1.0f / 60.0f);
+        }
+        bool filled = p->mag[WPN_AR] == game_player_mag_cap(WPN_AR) && p->reload_timer <= 0.0f;
+        p->mag[WPN_AR] = 0;
+        p->ammo[WPN_AR] = 60;
+        p->protection = 0.0f;
+        p->reload_timer = 0.0f; p->reload_total = 0.0f; p->reload_weapon = -1;
+        p->fire_timer = 0.0f;
+        int ammo_before = p->ammo[WPN_AR];
+        game_fire(g, p, false);
+        bool auto_started = p->reload_timer > 0.0f && p->ammo[WPN_AR] == ammo_before;
+        reload_ok = started && filled && auto_started;
+        printf("[selftest] reload: start=%s fill=%s auto=%s %s\n",
+               started ? "ok" : "FAILED", filled ? "ok" : "FAILED",
+               auto_started ? "ok" : "FAILED", reload_ok ? "ok" : "FAILED");
+        *p = saved;
+        for (int i = 0; i < g->num_players; i++) g->players[i].active = saved_active[i];
+    }
+
     /* deterministic vehicle test: spawn all classes, board, drive, fire
      * without using player ammo, destroy, and respawn. */
     bool vehicle_ok = false;
@@ -2925,9 +3573,118 @@ static void run_selftest(App* a) {
         game_reset(g);
     }
 
+    /* Fortnite building + Altis Life smoke tests */
+    bool build_ok = false, life_ok = false;
+    {
+        Game* g = a->game;
+        int saved_mode = g->game_mode;
+        game_set_mode(g, GM_DM);
+        game_reset(g);
+        Player* p = &g->players[g->local_player];
+        p->mats[0] = p->mats[1] = p->mats[2] = 100;
+        p->build_mat = 0;
+        p->build_sel = 0;
+        p->build_mode = true;
+        p->build_cd = 0.0f;
+        p->alive = true;
+        game_build_select(p, 0);
+        p->build_cd = 0.0f;
+        int before_actors = g->world->count;
+        bool placed = game_build_attempt(g, p);
+        int built = 0;
+        for (int i = 0; i < MAX_BUILDS; i++) if (g->builds[i].active) built++;
+        int actor_grew = g->world->count > before_actors;
+        int spent = 100 - p->mats[0];
+        if (placed) {
+            /* Render one frame with the build preview visible for the shot. */
+            p->build_mode = true;
+            p->build_cd = 0.0f;
+            app_frame(a, 1.0f / 60.0f);
+            app_render(a);
+            SDL_GL_SwapWindow(a->win);
+            save_screenshot(a->w, a->h, "shots/selftest_build.png");
+            reset_frame_edges(a);
+        }
+        int piece = -1;
+        for (int i = 0; i < MAX_BUILDS; i++) if (g->builds[i].active) { piece = i; break; }
+        bool damaged = false, destroyed = false;
+        if (piece >= 0) {
+            float hp0 = g->builds[piece].hp;
+            game_build_damage(g, piece, 10.0f, 0, g->builds[piece].pos);
+            damaged = g->builds[piece].active && g->builds[piece].hp < hp0;
+            game_build_damage(g, piece, 99999.0f, 0, g->builds[piece].pos);
+            destroyed = !g->builds[piece].active;
+        }
+        game_build_clear(g);
+        bool cleared = true;
+        for (int i = 0; i < MAX_BUILDS; i++) if (g->builds[i].active) cleared = false;
+        build_ok = placed && built == 1 && actor_grew && spent == 10 && damaged && destroyed && cleared;
+
+        game_set_mode(g, GM_ALTIS);
+        game_reset(g);
+        Player* lp = &g->players[g->local_player];
+        lp->alive = true;
+        lp->cash = 0; lp->bank = 0; lp->ore = 0; lp->wanted = 0; lp->life_job = 0; lp->life_cd = 0;
+        int jobs = 0, mines = 0, shops = 0, atms = 0, hospitals = 0;
+        for (int i = 0; i < g->life_point_count; i++) {
+            switch (g->life_points[i].type) {
+            case LIFE_JOB: jobs++; break;
+            case LIFE_MINE: mines++; break;
+            case LIFE_SHOP: shops++; break;
+            case LIFE_ATM: atms++; break;
+            case LIFE_HOSPITAL: hospitals++; break;
+            }
+        }
+        lp->pos = g->life_points[0].pos;
+        lp->life_cd = 0;
+        bool took_job = game_life_interact(g, lp) && lp->life_job == 1;
+        /* put the player at the mine and dig, then sell at the shop */
+        bool mined = false, sold = false;
+        for (int i = 0; i < g->life_point_count; i++) {
+            if (g->life_points[i].type == LIFE_MINE) {
+                lp->pos = g->life_points[i].pos;
+                lp->life_cd = 0;
+                mined = game_life_interact(g, lp) && lp->ore > 0;
+                break;
+            }
+        }
+        int ore = lp->ore;
+        for (int i = 0; i < g->life_point_count; i++) {
+            if (g->life_points[i].type == LIFE_SHOP) {
+                lp->pos = g->life_points[i].pos;
+                lp->life_cd = 0;
+                sold = game_life_interact(g, lp) && lp->cash > 0 && lp->ore == 0;
+                break;
+            }
+        }
+        bool atm_ok = false;
+        for (int i = 0; i < g->life_point_count; i++) {
+            if (g->life_points[i].type == LIFE_ATM) {
+                lp->pos = g->life_points[i].pos;
+                lp->life_cd = 0;
+                int cash = lp->cash;
+                atm_ok = game_life_interact(g, lp) && lp->bank == cash && lp->cash == 0;
+                break;
+            }
+        }
+        life_ok = g->life_point_count >= 6 && jobs >= 1 && mines >= 1 && shops >= 1 && atms >= 1 &&
+                  hospitals >= 1 && took_job && mined && ore > 0 && sold && atm_ok;
+        printf("[selftest] build: placed=%s pieces=%d actors=%s spent=%d damage=%s destroy=%s clear=%s %s\n",
+               placed ? "ok" : "FAILED", built, actor_grew ? "ok" : "FAILED", spent,
+               damaged ? "ok" : "FAILED", destroyed ? "ok" : "FAILED", cleared ? "ok" : "FAILED",
+               build_ok ? "ok" : "FAILED");
+        printf("[selftest] altis: points=%d jobs=%d mines=%d shops=%d atms=%d hospitals=%d contract=%s mine=%s sell=%s atm=%s %s\n",
+               g->life_point_count, jobs, mines, shops, atms, hospitals,
+               took_job ? "ok" : "FAILED", mined ? "ok" : "FAILED", sold ? "ok" : "FAILED",
+               atm_ok ? "ok" : "FAILED", life_ok ? "ok" : "FAILED");
+
+        game_set_mode(g, saved_mode);
+        game_reset(g);
+    }
+
     /* game mode / scale smoke tests */
     bool modes_ok = true;
-    const int test_modes[] = { GM_DM, GM_TDM, GM_CTF, GM_VCTF, GM_ASSAULT, GM_ONSLAUGHT, GM_CONQUEST, GM_RPG, GM_BATTLE_ROYALE };
+    const int test_modes[] = { GM_DM, GM_TDM, GM_CTF, GM_VCTF, GM_ASSAULT, GM_ONSLAUGHT, GM_CONQUEST, GM_RPG, GM_BATTLE_ROYALE, GM_ALTIS };
     for (int mi = 0; mi < (int)(sizeof(test_modes) / sizeof(test_modes[0])); mi++) {
         game_set_mode(a->game, test_modes[mi]);
         game_reset(a->game);
@@ -2947,9 +3704,14 @@ static void run_selftest(App* a) {
         if (test_modes[mi] == GM_VCTF) ok = ok && g->vehicle_count >= 4;
         if (test_modes[mi] == GM_BATTLE_ROYALE) ok = g->zone_radius > 0 && g->br_total > 0;
         if (test_modes[mi] == GM_RPG) ok = g->players[0].level >= 1 && g->players[0].xp_next > 0;
+        if (test_modes[mi] == GM_ALTIS) ok = g->life_point_count >= 6 && g->time_limit > 1e8f;
         printf("[selftest] mode %-9s %s  nodes=%d vehicles=%d flags=%d zone=%.0f\n",
                game_mode_short(test_modes[mi]), ok ? "ok" : "FAILED",
                g->node_count, g->vehicle_count, (g->flags[0].active ? 1 : 0) + (g->flags[1].active ? 1 : 0), g->zone_radius);
+        if (test_modes[mi] == GM_ALTIS)
+            save_screenshot(a->w, a->h, "shots/selftest_altis.png");
+        if (test_modes[mi] == GM_BATTLE_ROYALE)
+            save_screenshot(a->w, a->h, "shots/selftest_br.png");
         modes_ok = modes_ok && ok;
     }
     /* RPG/Druid upgrades + match-end reward payout */
@@ -3136,7 +3898,8 @@ static void run_selftest(App* a) {
     printf("[selftest] gl errors: 0x%x\n", glerr);
     bool nav_ok = navreach > nav / 2 && hintnodes > 0;
     printf("[selftest] %s\n", (menu_png && game_png && editor_png && editor_ok && load_ok && net_ok && pie_ok &&
-                               modes_ok && zones_ok && rpg_ok && reward_ok && nature_ok && invasion_ok && nav_ok && move_ok && vehicle_ok &&
+                               modes_ok && zones_ok && rpg_ok && reward_ok && nature_ok && invasion_ok && nav_ok && move_ok && reload_ok && vehicle_ok &&
+                               build_ok && life_ok &&
                                glerr == GL_NO_ERROR) ? "PASS" : "FAIL");
     a->running = false;
 }
@@ -3281,7 +4044,10 @@ static bool run_bottest(App* a, int seconds) {
 
     bool move_ok = total_alive > 0 && move_pct >= 25.0f;
     bool dist_ok = avg_travel >= 3.0f;
-    bool nav_ok = path_pct >= 90 && visited >= need_nodes;
+    /* Altis civilians deliberately stay around their POIs instead of
+     * exploring the whole nav graph, so coverage is not a fair check there. */
+    bool wander_mode = g->game_mode == GM_ALTIS;
+    bool nav_ok = path_pct >= 90 && (wander_mode ? visited >= 1 : visited >= need_nodes);
     bool bots_ok = bots > 0 && active_bots == bots;
     bool vehicle_mode = g->game_mode == GM_VCTF || g->game_mode == GM_ONSLAUGHT || g->game_mode == GM_CONQUEST;
     bool vehicle_ok = !vehicle_mode || (veh_active >= 2 && veh_types >= 2 && veh_entered >= 1);

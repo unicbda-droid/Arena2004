@@ -79,8 +79,8 @@ void hud_draw_weapon_bar(Ui* ui, Game* g, int w, int h) {
         ui_rect(ui, baseX - 150, yy, 150, 36, bg);
         ui_rect(ui, baseX - 150, yy, 3, 36, sel ? accent : col(0.24f, 0.28f, 0.33f, 1));
         weapon_icon(ui, baseX - 142, yy + 4, 28, i, weapon_defs[i].color, owned);
-        char num[16]; snprintf(num, sizeof(num), "%d", p->ammo[i]);
-        ui_text_right(ui, baseX - 10, yy + 9, num, 15, owned ? (sel ? white : dim) : col(0.35f, 0.38f, 0.42f, 0.7f));
+        char num[20]; snprintf(num, sizeof(num), "%d/%d", p->mag[i], p->ammo[i]);
+        ui_text_right(ui, baseX - 10, yy + 12, num, 10, owned ? (sel ? white : dim) : col(0.35f, 0.38f, 0.42f, 0.7f));
         ui_text(ui, baseX - 106, yy + 10, weapon_defs[i].short_name, 11, owned ? (sel ? white : dim) : col(0.35f, 0.38f, 0.42f, 0.5f));
     }
 }
@@ -247,11 +247,18 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     ui_rect(ui, w - 36, h - 118, 4, 100, col(accent.r, accent.g, accent.b, 0.9f));
     weapon_icon(ui, w - 314, h - 110, 44, wi, weapon_defs[wi].color, true);
     ui_text(ui, w - 258, h - 110, weapon_ammo_name(wi), 12, white);
-    char ammo[32]; snprintf(ammo, sizeof(ammo), "%d", me->ammo[wi]);
-    ui_text_right(ui, w - 44, h - 114, ammo, 46, me->ammo[wi] <= 3 ? red : white);
-    char mx[32]; snprintf(mx, sizeof(mx), "/ %d", game_player_ammo_max(me, wi));
+    char ammo[32]; snprintf(ammo, sizeof(ammo), "%d", me->mag[wi]);
+    ui_text_right(ui, w - 44, h - 114, ammo, 46, me->mag[wi] <= 0 ? red : white);
+    char mx[32]; snprintf(mx, sizeof(mx), "/ %d", me->ammo[wi]);
     ui_text_right(ui, w - 44, h - 66, mx, 11, dim);
-    ui_text(ui, w - 258, h - 92, "AMMO", 9, dim);
+    ui_text(ui, w - 258, h - 92, me->reload_timer > 0.0f ? "NACHLADEN..." : "MAGAZIN / RESERVE", 9,
+            me->reload_timer > 0.0f ? col(0.98f, 0.62f, 0.16f, 1) : dim);
+    if (me->reload_timer > 0.0f && me->reload_weapon == wi) {
+        float total = me->reload_total > 0.01f ? me->reload_total : 1.0f;
+        float rl = 1.0f - clampf(me->reload_timer / total, 0.0f, 1.0f);
+        ui_rect(ui, w - 318, h - 22, 286, 3, col(0.12f, 0.15f, 0.2f, 0.9f));
+        ui_rect(ui, w - 318, h - 22, 286 * rl, 3, col(0.98f, 0.62f, 0.16f, 1));
+    }
 
     /* ---------- RPG level / XP ---------- */
     if (g->game_mode == GM_RPG || g->game_mode == GM_INVASION) {
@@ -288,6 +295,75 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
             const char* st = f->carried ? "TAKEN" : (f->dropped ? "DROPPED" : "HOME");
             char fb[48]; snprintf(fb, sizeof(fb), "%s FLAG %s", t == 0 ? "RED" : "BLUE", st);
             ui_text(ui, cx - 120 + t * 130, (float)h - 172, fb, 9, t == 0 ? red : cyan);
+        }
+    }
+
+    /* ---------- Fortnite building HUD ---------- */
+    if (me->alive && me->build_mode) {
+        float bw = 430, bh = 92;
+        float bxp = cx - bw * 0.5f, byp = (float)h - 320;
+        ui_rect(ui, bxp, byp, bw, bh, col(0.02f, 0.035f, 0.05f, 0.86f));
+        ui_rect(ui, bxp, byp, bw, 3, col(0.30f, 1.0f, 0.45f, 0.9f));
+        ui_text(ui, bxp + 12, byp + 9, "BAUMODUS", 12, col(0.42f, 1.0f, 0.55f, 1));
+        ui_text_right(ui, bxp + bw - 12, byp + 9, "B = AUS", 9, dim);
+        static const char* PIECES[3] = { "1 WAND", "2 BODEN", "3 RAMPE" };
+        for (int i = 0; i < 3; i++) {
+            bool sel = me->build_sel == i;
+            ui_rect(ui, bxp + 10 + i * 98, byp + 28, 92, 22,
+                    sel ? col(0.16f, 0.42f, 0.24f, 0.95f) : col(0.05f, 0.08f, 0.10f, 0.9f));
+            ui_text(ui, bxp + 18 + i * 98, byp + 33, PIECES[i], 10, sel ? white : dim);
+        }
+        ui_text(ui, bxp + 308, byp + 33, game_build_piece_name(me->build_sel), 10, col(0.85f, 0.92f, 1.0f, 1));
+        ui_text(ui, bxp + 12, byp + 56, "MATERIAL  MAUSRAD", 8, dim);
+        static const int MAT_KEYS[3] = { 0, 1, 2 };
+        for (int i = 0; i < 3; i++) {
+            int mat = MAT_KEYS[i];
+            bool sel = me->build_mat == mat;
+            float f = fminf(1.0f, (float)me->mats[mat] / 200.0f);
+            Color mc = mat == 0 ? col(0.72f, 0.48f, 0.24f, 1) :
+                       (mat == 1 ? col(0.68f, 0.68f, 0.64f, 1) : col(0.60f, 0.72f, 0.86f, 1));
+            ui_rect(ui, bxp + 92 + i * 88, byp + 54, 76, 14, col(0.06f, 0.08f, 0.10f, 0.9f));
+            ui_rect(ui, bxp + 92 + i * 88, byp + 54, 76 * f, 14, mc);
+            char mb[20]; snprintf(mb, sizeof(mb), "%d", me->mats[mat]);
+            ui_text(ui, bxp + 96 + i * 88, byp + 72, game_build_material_name(mat), 8, sel ? mc : dim);
+            ui_text_right(ui, bxp + 164 + i * 88, byp + 72, mb, 8, sel ? white : dim);
+        }
+        ui_text_right(ui, bxp + bw - 12, byp + 58, "R = DREHEN   FEUER = BAUEN", 8, col(0.72f, 0.82f, 0.95f, 0.95f));
+    }
+
+    /* ---------- Altis Life HUD ---------- */
+    if (g->game_mode == GM_ALTIS && me->alive) {
+        float lw = 322, lh = 104;
+        float lx = 34, ly = (float)h - 232;
+        ui_rect(ui, lx, ly, lw, lh, col(0.02f, 0.035f, 0.05f, 0.82f));
+        ui_rect(ui, lx, ly, 4, lh, col(0.98f, 0.72f, 0.18f, 0.95f));
+        ui_text(ui, lx + 14, ly + 8, "ALTIS LIFE", 14, col(0.98f, 0.86f, 0.42f, 1));
+        char wb[64];
+        snprintf(wb, sizeof(wb), "GESUCHT");
+        ui_text(ui, lx + 148, ly + 11, wb, 8, dim);
+        for (int i = 0; i < 5; i++)
+            ui_text(ui, lx + 208 + i * 15, ly + 8, i < me->wanted ? "*" : "-", 12,
+                    i < me->wanted ? col(1.0f, 0.30f, 0.22f, 1) : col(0.35f, 0.40f, 0.46f, 1));
+        char cb[48], bb[48], ob[48];
+        snprintf(cb, sizeof(cb), "%d $", me->cash);
+        snprintf(bb, sizeof(bb), "%d $", me->bank);
+        snprintf(ob, sizeof(ob), "%d", me->ore);
+        ui_text(ui, lx + 14, ly + 34, "BAR", 8, dim);
+        ui_text(ui, lx + 44, ly + 30, cb, 15, col(0.55f, 1.0f, 0.60f, 1));
+        ui_text(ui, lx + 128, ly + 34, "BANK", 8, dim);
+        ui_text(ui, lx + 162, ly + 30, bb, 15, col(0.45f, 0.82f, 1.0f, 1));
+        ui_text(ui, lx + 240, ly + 34, "ERZ", 8, dim);
+        ui_text(ui, lx + 266, ly + 30, ob, 15, col(0.78f, 0.72f, 0.62f, 1));
+        const char* job = me->life_job == 1 ? (me->life_stage == 0 ? "LIEFERAUFTRAG: ZUM DEPOT" : "AUFTRAG AKTIV") : "ARBEITSLOS";
+        ui_text(ui, lx + 14, ly + 56, job, 10, me->life_job ? col(0.45f, 1.0f, 0.60f, 1) : dim);
+        if (g->life_near >= 0 && g->life_near < g->life_point_count) {
+            LifePoint* lp = &g->life_points[g->life_near];
+            char pr[96];
+            snprintf(pr, sizeof(pr), "E = %s BENUTZEN", lp->name);
+            ui_rect(ui, lx + 8, ly + 76, lw - 16, 22, col(0.10f, 0.16f, 0.10f, 0.9f));
+            ui_text(ui, lx + 14, ly + 81, pr, 10, col(0.55f, 1.0f, 0.60f, 1));
+        } else {
+            ui_text(ui, lx + 14, ly + 80, "E = BENUTZEN   //   SAMMELN AN BAUMEN / STEINEN / SCHROTT", 7, col(0.52f, 0.58f, 0.66f, 0.9f));
         }
     }
 
@@ -356,6 +432,7 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
         ui_text_center(ui, cx, h * 0.34f + 44, kb, 18, col(0.9f, 0.85f, 0.85f, 0.9f));
         char rb[64]; snprintf(rb, sizeof(rb), "RESPAWN IN %.1f", fmaxf(me->respawn_timer, 0));
         ui_text_center(ui, cx, h * 0.34f + 78, rb, 13, dim);
+        ui_text_center(ui, cx, h * 0.34f + 100, "ENTER = SOFORT RESPAWN", 11, col(0.98f, 0.62f, 0.16f, 0.9f));
     }
 
     /* ---------- match over / victory & defeat sequence ---------- */
@@ -431,6 +508,14 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
         if (t > 1.15f)
             ui_text_center(ui, cx, py + ph - 48, "TAB = SCORES   //   F5 = NEUSTART   //   F10 = MENUE   //   KONSOLE: results",
                            10, col(0.75f, 0.72f, 0.64f, a));
+    }
+
+    /* ---------- control hint ---------- */
+    if (me->alive) {
+        const char* hint = g->game_mode == GM_ALTIS
+            ? "E = BENUTZEN / SAMMELN   B = BAUEN   R = NACHLADEN   ENTER = RESPAWN / UNSTUCK"
+            : "B = BAUEN   E = SAMMELN   R = NACHLADEN   ENTER = RESPAWN / UNSTUCK";
+        ui_text(ui, 22, (float)h - 38, hint, 9, col(0.42f, 0.48f, 0.56f, 0.75f));
     }
 
     /* ---------- fps / net ---------- */

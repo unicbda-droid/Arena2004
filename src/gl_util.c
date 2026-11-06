@@ -81,7 +81,7 @@ Mesh mesh_sphere(int seg,int rings){
     int ii=0;
     for(int r=0;r<rings;r++) for(int s=0;s<seg;s++){
         int a=r*(seg+1)+s, b=a+seg+1;
-        idx[ii++]=a; idx[ii++]=b; idx[ii++]=a+1; idx[ii++]=a+1; idx[ii++]=b; idx[ii++]=b+1;
+        idx[ii++]=a; idx[ii++]=a+1; idx[ii++]=b; idx[ii++]=a+1; idx[ii++]=b+1; idx[ii++]=b;
     }
     Mesh m=mesh_make(v,vi,idx,ii); free(v); free(idx); return m;
 }
@@ -93,14 +93,14 @@ Mesh mesh_cylinder(int seg,bool caps){
         v[vi++]=(Vertex){v3(c*.5f,-.5f,sn*.5f),v3(c,0,sn),v2((float)s/seg,1)};
         v[vi++]=(Vertex){v3(c*.5f,.5f,sn*.5f),v3(c,0,sn),v2((float)s/seg,0)};
     }
-    for(int s=0;s<seg;s++){ int a=s*2,b=a+1,c=a+2,d=a+3; idx[ii++]=a;idx[ii++]=c;idx[ii++]=b; idx[ii++]=b;idx[ii++]=c;idx[ii++]=d; }
+    for(int s=0;s<seg;s++){ int a=s*2,b=a+1,c=a+2,d=a+3; idx[ii++]=a;idx[ii++]=b;idx[ii++]=c; idx[ii++]=b;idx[ii++]=d;idx[ii++]=c; }
     if(caps){
         int top=vi; for(int s=0;s<=seg;s++){ float a=2*PI*s/seg; v[vi++]=(Vertex){v3(cosf(a)*.5f,.5f,sinf(a)*.5f),v3(0,1,0),v2(cosf(a)*.5f+.5f,sinf(a)*.5f+.5f)}; }
         int tcenter=vi; v[vi++]=(Vertex){v3(0,.5f,0),v3(0,1,0),v2(.5f,.5f)};
-        for(int s=0;s<seg;s++){ idx[ii++]=tcenter; idx[ii++]=top+s; idx[ii++]=top+s+1; }
+        for(int s=0;s<seg;s++){ idx[ii++]=tcenter; idx[ii++]=top+s+1; idx[ii++]=top+s; }
         int bot=vi; for(int s=0;s<=seg;s++){ float a=2*PI*s/seg; v[vi++]=(Vertex){v3(cosf(a)*.5f,-.5f,sinf(a)*.5f),v3(0,-1,0),v2(cosf(a)*.5f+.5f,sinf(a)*.5f+.5f)}; }
         int bcenter=vi; v[vi++]=(Vertex){v3(0,-.5f,0),v3(0,-1,0),v2(.5f,.5f)};
-        for(int s=0;s<seg;s++){ idx[ii++]=bcenter; idx[ii++]=bot+s+1; idx[ii++]=bot+s; }
+        for(int s=0;s<seg;s++){ idx[ii++]=bcenter; idx[ii++]=bot+s; idx[ii++]=bot+s+1; }
     }
     Mesh m=mesh_make(v,vi,idx,ii); free(v); free(idx); return m;
 }
@@ -113,11 +113,11 @@ Mesh mesh_cone(int seg){
         Vec3 n0=v3(cosf(a0),.5f,sinf(a0)),n1=v3(cosf(a1),.5f,sinf(a1));
         int b=vi;
         v[vi++]=(Vertex){p0,n0,v2((float)s/seg,1)}; v[vi++]=(Vertex){p1,n1,v2((float)(s+1)/seg,1)}; v[vi++]=(Vertex){tip,v3norm(v3add(n0,n1)),v2((float)(s+.5f)/seg,0)};
-        idx[ii++]=b;idx[ii++]=b+1;idx[ii++]=b+2;
+        idx[ii++]=b;idx[ii++]=b+2;idx[ii++]=b+1;
     }
     int bot=vi; for(int s=0;s<=seg;s++){ float a=2*PI*s/seg; v[vi++]=(Vertex){v3(cosf(a)*.5f,-.5f,sinf(a)*.5f),v3(0,-1,0),v2(cosf(a)*.5f+.5f,sinf(a)*.5f+.5f)}; }
     int cen=vi; v[vi++]=(Vertex){v3(0,-.5f,0),v3(0,-1,0),v2(.5f,.5f)};
-    for(int s=0;s<seg;s++){ idx[ii++]=cen; idx[ii++]=bot+s+1; idx[ii++]=bot+s; }
+    for(int s=0;s<seg;s++){ idx[ii++]=cen; idx[ii++]=bot+s; idx[ii++]=bot+s+1; }
     Mesh m=mesh_make(v,vi,idx,ii); free(v); free(idx); return m;
 }
 Mesh mesh_ramp(void){
@@ -156,12 +156,41 @@ void fbo_resize(Framebuffer* fb,int w,int h,bool hdr){
 void fbo_bind(Framebuffer* fb){ glBindFramebuffer(GL_FRAMEBUFFER,fb?fb->fbo:0); glViewport(0,0,fb?fb->w:0,fb?fb->h:0); }
 void fbo_free(Framebuffer* fb){ if(fb->fbo)glDeleteFramebuffers(1,&fb->fbo); if(fb->color_tex)glDeleteTextures(1,&fb->color_tex); if(fb->depth_rb)glDeleteRenderbuffers(1,&fb->depth_rb); memset(fb,0,sizeof(*fb)); }
 
+/* ---------------- anisotropic filtering ---------------- */
+/* 16x anisotropic filtering dramatically sharpens floors, walls and catwalks
+ * when seen at grazing angles. The extension is optional, so query it lazily
+ * after the GL context exists and clamp to both 16x and the driver maximum. */
+static bool g_aniso_queried = false;
+static float g_aniso_max = 1.0f;
+
+void texture_aniso_init(void){
+    if(g_aniso_queried) return;
+    g_aniso_queried = true;
+#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
+    if(GLEW_EXT_texture_filter_anisotropic){
+        GLfloat m = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&m);
+        if(m < 1.0f) m = 1.0f;
+        if(m > 16.0f) m = 16.0f;
+        g_aniso_max = m;
+    }
+#endif
+}
+float texture_aniso_max(void){ texture_aniso_init(); return g_aniso_max; }
+static void texture_apply_aniso(void){
+    texture_aniso_init();
+#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
+    if(g_aniso_max > 1.0f) glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAX_ANISOTROPY_EXT,g_aniso_max);
+#endif
+}
+
 GLuint texture_create_rgba(int w,int h,const unsigned char* pixels,bool repeat,bool mipmap){
     GLuint t; glGenTextures(1,&t); glBindTexture(GL_TEXTURE_2D,t); glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,mipmap?GL_LINEAR_MIPMAP_LINEAR:GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,repeat?GL_REPEAT:GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,repeat?GL_REPEAT:GL_CLAMP_TO_EDGE);
+    texture_apply_aniso();
     if(mipmap) glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D,0); return t;
 }
@@ -171,6 +200,7 @@ GLuint texture_create_float(int w,int h,const float* pixels,bool repeat,bool mip
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,repeat?GL_REPEAT:GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,repeat?GL_REPEAT:GL_CLAMP_TO_EDGE);
+    texture_apply_aniso();
     if(mipmap) glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D,0); return t;
 }
@@ -342,6 +372,113 @@ GLuint make_world_atlas(void){
         int fx=x+3*T, fy=y+3*T;
         float base=0.02f+fbm(fx*0.03f,fy*0.03f,3)*0.02f;
         px(d,S,fx,fy,base,base*1.05f,base*1.15f,1);
+    }
+    GLuint t=texture_create_rgba(S,S,d,true,true); free(d); return t;
+}
+
+/* Height field for the procedural normal map. One pattern per atlas tile so
+ * panels, grates, treads and hazard stripes all react to the light. */
+static float normal_height(int tile, float x, float y){
+    float n = fbm(x*0.055f + tile*31.0f, y*0.055f + tile*17.0f, 4);
+    float h = n*0.30f;
+    float px, py, edge, d;
+    switch(tile & 15){
+    case 0: /* metal panels + rivets */
+        px=fmodf(x,64.0f); py=fmodf(y,64.0f);
+        edge=fminf(fminf(px,64.0f-px),fminf(py,64.0f-py));
+        h += edge<4.0f ? -0.10f+(edge*0.025f) : 0.07f;
+        for(int ry=0;ry<2;ry++)for(int rx=0;rx<2;rx++){
+            d=sqrtf((px-(16.0f+rx*32.0f))*(px-(16.0f+rx*32.0f))+(py-(16.0f+ry*32.0f))*(py-(16.0f+ry*32.0f)));
+            if(d<5.0f) h += (1.0f-d/5.0f)*0.12f;
+        }
+        break;
+    case 1: /* diamond tread floor */
+        d=fabsf(fmodf((x+y)/22.0f,1.0f)-0.5f);
+        h += d<0.12f ? 0.12f*(1.0f-d/0.12f) : 0.0f;
+        d=fabsf(fmodf((x-y+1000.0f)/22.0f,1.0f)-0.5f);
+        h += d<0.10f ? 0.10f*(1.0f-d/0.10f) : 0.0f;
+        px=fmodf(x,32.0f); py=fmodf(y,32.0f);
+        if(px<2.0f||py<2.0f) h -= 0.10f;
+        break;
+    case 2: /* hazard stripes */
+        px=fmodf((x+y)*0.09f,1.0f);
+        h += px<0.5f ? 0.02f : 0.06f;
+        break;
+    case 3: /* grate */
+        px=fmodf(x,16.0f); py=fmodf(y,16.0f);
+        if(px>3.0f&&px<13.0f&&py>3.0f&&py<13.0f) h -= 0.18f;
+        else h += 0.10f;
+        break;
+    case 4: /* concrete */
+        h = n*0.55f;
+        break;
+    case 5: /* circuit lines */
+        px=fmodf(x,64.0f); py=fmodf(y,64.0f);
+        if((fabsf(px-32.0f)<3.0f&&py<32.0f)||(fabsf(py-32.0f)<3.0f&&px>32.0f)||
+           (fabsf(px-12.0f)<2.5f&&py>12.0f)) h += 0.14f;
+        break;
+    case 6: /* blue panels */
+        px=fmodf(x,64.0f); py=fmodf(y,64.0f);
+        edge=fminf(fminf(px,64.0f-px),fminf(py,64.0f-py));
+        h += edge<3.0f ? -0.12f : 0.06f;
+        break;
+    case 7: /* rust */
+        h = n*0.65f + fbm(x*0.15f+9.0f,y*0.15f,3)*0.25f;
+        break;
+    case 8: /* clean white panels */
+        px=fmodf(x,64.0f); py=fmodf(y,64.0f);
+        edge=fminf(fminf(px,64.0f-px),fminf(py,64.0f-py));
+        h += edge<2.5f ? -0.09f : 0.04f;
+        break;
+    case 9: /* hex grid */
+        px=fmodf(x*0.06f+y*0.06f*0.577f,1.0f);
+        py=fmodf(x*0.06f-y*0.06f*0.577f,1.0f);
+        h += (fabsf(px-0.5f)>0.44f||fabsf(py-0.5f)>0.44f) ? -0.10f : 0.05f;
+        break;
+    case 10: /* ribbed trim */
+        h += cosf(x*0.52f)*0.10f;
+        break;
+    case 11: /* red armor panels */
+        px=fmodf(x,48.0f); py=fmodf(y,48.0f);
+        edge=fminf(fminf(px,48.0f-px),fminf(py,48.0f-py));
+        h += edge<3.0f ? -0.13f : 0.05f;
+        break;
+    case 12: /* yellow tech grid */
+        px=fmodf(x,32.0f); py=fmodf(y,32.0f);
+        if(px<2.5f||py<2.5f) h += 0.16f;
+        break;
+    case 13: /* dark blue metal */
+        h = n*0.45f;
+        px=fmodf(x,64.0f);
+        if(px<2.5f) h -= 0.10f;
+        break;
+    case 14: /* hazard blue */
+        px=fmodf((x+y)*0.09f,1.0f);
+        h += px<0.5f ? 0.03f : 0.08f;
+        break;
+    default: /* glossy black */
+        h = n*0.22f;
+        break;
+    }
+    return h;
+}
+
+GLuint make_normal_atlas(void){
+    enum {S=1024,T=256,N=4};
+    unsigned char* d=malloc((size_t)S*S*4);
+    if(!d) return 0;
+    for(int ty=0;ty<N;ty++)for(int tx=0;tx<N;tx++){
+        int tile=ty*N+tx;
+        for(int y=0;y<T;y++)for(int x=0;x<T;x++){
+            float hx0=normal_height(tile,(float)fmaxf(x-1,0),(float)y);
+            float hx1=normal_height(tile,(float)fminf(x+1,T-1),(float)y);
+            float hy0=normal_height(tile,(float)x,(float)fmaxf(y-1,0));
+            float hy1=normal_height(tile,(float)x,(float)fminf(y+1,T-1));
+            float nx=(hx0-hx1)*5.0f, ny=(hy0-hy1)*5.0f;
+            float len=sqrtf(nx*nx+ny*ny+1.0f);
+            int fx=tx*T+x, fy=ty*T+y;
+            px(d,S,fx,fy,0.5f+nx/len*0.5f,0.5f+ny/len*0.5f,0.5f+1.0f/len*0.5f,1);
+        }
     }
     GLuint t=texture_create_rgba(S,S,d,true,true); free(d); return t;
 }

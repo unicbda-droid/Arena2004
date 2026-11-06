@@ -80,53 +80,100 @@ bool world_overlap_box(const World* w,AABB box,int ignore){
     return false;
 }
 static AABB player_box(Vec3 p,float r,float h){ AABB b={v3(p.x-r,p.y,p.z-r),v3(p.x+r,p.y+h,p.z+r)}; return b; }
+/* Overlap test with an epsilon: merely touching a surface is not a collision.
+ * The old <=/>= based test made standing on a deck look like an overlap on
+ * every frame and could snag or teleport the player at edges. */
+static bool overlap_eps(AABB a,AABB b,float e){
+    return a.min.x < b.max.x-e && a.max.x > b.min.x+e &&
+           a.min.y < b.max.y-e && a.max.y > b.min.y+e &&
+           a.min.z < b.max.z-e && a.max.z > b.min.z+e;
+}
+static bool box_free_for_step(const World* w,Vec3 p,float r,float h,int ignore){
+    return !world_overlap_box(w,player_box(p,r,h),ignore);
+}
 bool world_move_box(World* w,Vec3* pos,Vec3* vel,float dt,float radius,float height,bool* grounded,bool* hit_wall,int* ground_actor){
     bool was_grounded=*grounded; *grounded=false; *hit_wall=false; if(ground_actor)*ground_actor=-1;
     Vec3 p=*pos; Vec3 v=*vel;
-    /* horizontal x */
-    p.x += v.x*dt;
+    const float STEP=0.002f;
+
+    /* ---- vertical first -------------------------------------------------
+     * Resolving vertical penetration before the horizontal axes means a
+     * player who lands slightly inside a floor is pushed up instead of being
+     * shoved sideways out of the platform. */
+    p.y += v.y*dt;
     for(int i=0;i<w->count;i++){
         const Actor* a=&w->actors[i]; if(!world_actor_solid(a)||a->shape==SHAPE_RAMP) continue;
         AABB b=world_actor_aabb(w,a);
         AABB pb=player_box(p,radius,height);
-        if(aabb_overlap(pb,b)){
-            if(v.x>0){ p.x=b.min.x-radius-0.002f; } else if(v.x<0){ p.x=b.max.x+radius+0.002f; }
-            v.x=0; *hit_wall=true;
+        if(!overlap_eps(pb,b,0.0005f)) continue;
+        float up=(b.max.y+0.0005f)-p.y;
+        float down=(p.y+height+0.0005f)-b.min.y;
+        if(up<=down){
+            p.y+=up; if(v.y<0) v.y=0; *grounded=true; if(ground_actor)*ground_actor=i;
+        } else {
+            p.y-=down; if(v.y>0) v.y=0;
         }
     }
-    p.z += v.z*dt;
-    for(int i=0;i<w->count;i++){
-        const Actor* a=&w->actors[i]; if(!world_actor_solid(a)||a->shape==SHAPE_RAMP) continue;
-        AABB b=world_actor_aabb(w,a);
-        AABB pb=player_box(p,radius,height);
-        if(aabb_overlap(pb,b)){
-            if(v.z>0){ p.z=b.min.z-radius-0.002f; } else if(v.z<0){ p.z=b.max.z+radius+0.002f; }
-            v.z=0; *hit_wall=true;
-        }
-    }
-    /* ground snap along ramps after horizontal movement */
-    for(int i=0;i<w->count;i++){
-        const Actor* a=&w->actors[i]; if(a->type!=ACT_BRUSH||a->shape!=SHAPE_RAMP||!(a->flags&FLAG_SOLID)) continue;
-        float surf=world_ramp_height(a,p.x,p.z); if(surf<-1e8f) continue;
-        if(was_grounded && fabsf(p.y-surf)<0.65f){ p.y=surf; v.y=0; *grounded=true; if(ground_actor)*ground_actor=i; }
-    }
-    /* vertical */
-    if(!*grounded) p.y += v.y*dt;
-    for(int i=0;i<w->count;i++){
-        const Actor* a=&w->actors[i]; if(!world_actor_solid(a)||a->shape==SHAPE_RAMP) continue;
-        AABB b=world_actor_aabb(w,a);
-        AABB pb=player_box(p,radius,height);
-        if(aabb_overlap(pb,b)){
-            if(v.y<=0){ p.y=b.max.y+0.0005f; v.y=0; *grounded=true; if(ground_actor)*ground_actor=i; }
-            else { p.y=b.min.y-height-0.0005f; v.y=0; }
-        }
-    }
+    /* ramps: stand on the slope */
     for(int i=0;i<w->count;i++){
         const Actor* a=&w->actors[i]; if(a->type!=ACT_BRUSH||a->shape!=SHAPE_RAMP||!(a->flags&FLAG_SOLID)) continue;
         float surf=world_ramp_height(a,p.x,p.z); if(surf<-1e8f) continue;
         if(v.y<=0 && p.y<=surf && p.y>surf-1.2f){ p.y=surf; v.y=0; *grounded=true; if(ground_actor)*ground_actor=i; }
     }
-    /* floor safety */
+
+    /* ---- horizontal axes ------------------------------------------------
+     * The box is swept by moving one axis at a time. Each axis resolves the
+     * smallest penetration and re-scans, so overlapping map brushes cannot
+     * push the player into another solid. */
+    for(int axis=0;axis<2;axis++){
+        float* coord = axis==0 ? &p.x : &p.z;
+        float* vaxis = axis==0 ? &v.x : &v.z;
+        *coord += *vaxis*dt;
+        for(int iter=0;iter<6;iter++){
+            const Actor* hit=NULL; AABB hb; int hi=-1;
+            for(int i=0;i<w->count;i++){
+                const Actor* a=&w->actors[i]; if(!world_actor_solid(a)||a->shape==SHAPE_RAMP) continue;
+                AABB b=world_actor_aabb(w,a);
+                AABB pb=player_box(p,radius,height);
+                if(overlap_eps(pb,b,0.001f)){ hit=a; hb=b; hi=i; break; }
+            }
+            if(!hit) break;
+            /* step-up: low ledges should be walkable, not walls */
+            float rise=hb.max.y-p.y;
+            if((*grounded||was_grounded) && rise>0.0f && rise<=0.45f){
+                Vec3 lifted=v3(p.x,hb.max.y+0.001f,p.z);
+                if(box_free_for_step(w,lifted,radius,height,hi)){
+                    p.y=hb.max.y+0.001f; *grounded=true; continue;
+                }
+            }
+            if(axis==0){
+                float push_px=(hb.max.x+radius+STEP)-p.x;
+                float push_nx=p.x-(hb.min.x-radius-STEP);
+                bool plus = (*vaxis>0.0001f) ? true : ((*vaxis<-0.0001f) ? false : push_px<push_nx);
+                p.x += plus ? push_px : -push_nx;
+            } else {
+                float push_pz=(hb.max.z+radius+STEP)-p.z;
+                float push_nz=p.z-(hb.min.z-radius-STEP);
+                bool plus = (*vaxis>0.0001f) ? true : ((*vaxis<-0.0001f) ? false : push_pz<push_nz);
+                p.z += plus ? push_pz : -push_nz;
+            }
+            *vaxis=0; *hit_wall=true;
+        }
+    }
+    /* keep the player glued to ramps after horizontal movement */
+    for(int i=0;i<w->count;i++){
+        const Actor* a=&w->actors[i]; if(a->type!=ACT_BRUSH||a->shape!=SHAPE_RAMP||!(a->flags&FLAG_SOLID)) continue;
+        float surf=world_ramp_height(a,p.x,p.z); if(surf<-1e8f) continue;
+        if(was_grounded && fabsf(p.y-surf)<0.65f){ p.y=surf; v.y=0; *grounded=true; if(ground_actor)*ground_actor=i; }
+    }
+    /* Sub-stepping calls this function several times per frame. The first call
+     * consumes the gravity velocity and reports ground; the following calls
+     * have v.y==0 and would otherwise report airborne, which disabled step-up
+     * and made stairs feel sticky. Probe just below the feet to keep support. */
+    if(!*grounded && was_grounded && v.y<=0.0f){
+        Ray r; r.origin=v3(p.x,p.y+0.04f,p.z); r.dir=v3(0,-1,0); RayHit hit;
+        if(world_raycast(w,r,0.14f,true,&hit) && hit.normal.y>0.5f) *grounded=true;
+    }
     *pos=p; *vel=v;
     return *grounded;
 }
@@ -336,9 +383,9 @@ void world_default_deck17(World* w){
     PK(w,0,6.2f,-32, PICK_HEALTH_SMALL, 18);
 
     /* spawn points */
-    P(w, -18, -18, 45, 0); P(w, 18, -18, -45, 0); P(w, -18, 18, 135, 0); P(w, 18, 18, -135, 0);
+    P(w, -20, -20, 45, 0); P(w, 20, -20, -45, 0); P(w, -20, 20, 135, 0); P(w, 20, 20, -135, 0);
     P(w, -30, 0, 90, 0); P(w, 30, 0, -90, 0); P(w, 0, 24, 180, 0); P(w, 0, -24, 0, 0);
-    P(w, -34, 34, 45, 0); P(w, 34, -34, -135, 0);
+    P(w, -24, -24, 45, 0); P(w, 24, -24, -135, 0);
 }
 
 /* ------------- serialize ------------- */

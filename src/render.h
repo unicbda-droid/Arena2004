@@ -20,7 +20,7 @@ typedef WorldLight Light;
 typedef struct {
     GLuint prog_scene, prog_sky, prog_fx, prog_line, prog_bright, prog_blur, prog_composite;
     Mesh cube, sphere, cylinder, cone, ramp, quad;
-    GLuint world_tex, fx_tex;
+    GLuint world_tex, normal_tex, fx_tex;
     Framebuffer hdr, bloomA, bloomB;
     int w, h;
     int vx, vy, vw, vh;
@@ -33,6 +33,7 @@ typedef struct {
     Vec3 sun_dir; Color sun_color; float sun_intensity;
     float bloom_strength;
     float exposure;
+    float normal_strength;
     float time;
     bool viewmodel;
     /* fx batch */

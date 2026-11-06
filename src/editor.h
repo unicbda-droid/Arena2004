@@ -75,6 +75,10 @@ typedef struct {
     int map_count;
     int map_sel;
     int browser_tab;
+    int outline_scroll;
+    int outline_last;
+    float outline_click_t;
+    float ui_time;
     char map_name[64];
     char status[192];
     float status_t;

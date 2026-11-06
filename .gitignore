@@ -30,3 +30,8 @@ CMakeCache.txt
 cmake_install.cmake
 CPackConfig.cmake
 CPackSourceConfig.cmake
+
+# aider sessions
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v*/

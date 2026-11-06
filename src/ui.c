@@ -125,7 +125,10 @@ void ui_flush(Ui* ui){
 void ui_frame_begin(Ui* ui,int w,int h,UiInput in){
     ui->w=w; ui->h=h; ui->in=in; ui->vcount=0;
     ui->hot=0; ui->mouse_over_ui=false;
-    if(!in.down) ui->active=0;
+    /* Keep the active widget alive through the release frame. The button is
+     * only activated on release (clickable()), so clearing active here as
+     * soon as the button is up made real mouse clicks never fire. */
+    if(!in.down && !in.released) ui->active=0;
     if(in.text_len>0 && ui->focus){ for(int i=0;i<in.text_len&&ui->edit_len<255;i++){ unsigned char c=in.text[i]; if(c>=32&&c<127) ui->edit_buf[ui->edit_len++]=(char)c; } ui->edit_buf[ui->edit_len]=0; }
     if(ui->focus){
         if(in.backspace && ui->edit_len>0) ui->edit_buf[--ui->edit_len]=0;
@@ -169,6 +172,9 @@ void ui_frame_end(Ui* ui){
     if(ui->nav_count>0) memcpy(ui->nav_prev,ui->nav_items,sizeof(UiNavItem)*(size_t)ui->nav_count);
     ui->nav_prev_count=ui->nav_count;
     ui->nav_count=0;
+    /* Release edge has been consumed by the widgets above; never leave a
+     * widget stuck in the active/pressed state. */
+    if(!ui->in.down) ui->active=0;
     ui_flush(ui);
 }
 bool ui_nav_take_warp(Ui* ui,float* x,float* y){
