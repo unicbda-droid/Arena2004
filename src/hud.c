@@ -175,8 +175,25 @@ void hud_draw(Ui* ui, Game* g, int w, int h) {
     ui_text(ui, sx + stripW + 18, 6, dc, 30, game_mode_team_based(g->game_mode) ? (me->team == 0 ? cyan : red) : white);
     ui_text(ui, sx + stripW + 18, 38, game_mode_team_based(g->game_mode) ? "ENEMY" : "DEATHS", 9, dim);
 
+    /* ---------- minimap top-left with coordinates ---------- */
+    if (me->alive) {
+        float mx0 = 10, my0 = 10, msize = 160;
+        float mscale = (msize - 8.0f) / 80.0f; /* panel covers +/- 40 world units */
+        ui_rect(ui, mx0, my0, msize, msize, col(0.02f, 0.03f, 0.045f, 0.78f));
+        ui_rect_outline(ui, mx0, my0, msize, msize, col(0.55f, 0.65f, 0.8f, 0.9f), 1);
+        float px = mx0 + (me->pos.x + 40.0f) * mscale;
+        float py = my0 + (me->pos.z + 40.0f) * mscale;
+        if (px > mx0 && px < mx0 + msize && py > my0 && py < my0 + msize) {
+            ui_line(ui, v2(px - 2.5f, py - 2.5f), v2(px + 2.5f, py + 2.5f), accent, 2);
+            ui_line(ui, v2(px - 2.5f, py + 2.5f), v2(px + 2.5f, py - 2.5f), accent, 2);
+        }
+        char mbuf[64];
+        snprintf(mbuf, sizeof(mbuf), "X %.1f   Z %.1f", me->pos.x, me->pos.z);
+        ui_text(ui, mx0 + 6, my0 + msize + 6, mbuf, 10, dim);
+    }
+
     /* ---------- kill feed ---------- */
-    float ky = 70;
+    float ky = 200;
     for (int i = 0; i < MAX_KILLFEED; i++) {
         KillFeedItem* k = &g->killfeed[i];
         if (k->time <= 0) continue;
