@@ -13,9 +13,9 @@ void world_init(World* w){
     memset(w,0,sizeof(*w));
     str_copy(w->name,"DM-Deck17",sizeof(w->name));
     w->version=1;
-    w->fog_color=col3(0.018f,0.028f,0.045f); w->fog_density=0.011f;
-    w->ambient_sky=col3(0.10f,0.13f,0.20f); w->ambient_ground=col3(0.045f,0.038f,0.032f);
-    w->sun_dir=v3norm(v3(0.25f,1.0f,0.18f)); w->sun_color=col3(0.55f,0.65f,0.85f); w->sun_intensity=0.55f;
+    w->fog_color=col3(0.045f,0.06f,0.09f); w->fog_density=0.008f;
+    w->ambient_sky=col3(0.16f,0.19f,0.27f); w->ambient_ground=col3(0.10f,0.09f,0.08f);
+    w->sun_dir=v3norm(v3(0.25f,1.0f,0.18f)); w->sun_color=col3(0.75f,0.83f,1.0f); w->sun_intensity=0.8f;
 }
 void world_clear(World* w){ int v=w->version; char nm[64]; str_copy(nm,w->name,64); Color fc=w->fog_color; float fd=w->fog_density; Color as=w->ambient_sky,ag=w->ambient_ground; Vec3 sd=w->sun_dir; Color sc=w->sun_color; float si=w->sun_intensity; world_init(w); w->version=v; str_copy(w->name,nm,64); w->fog_color=fc;w->fog_density=fd;w->ambient_sky=as;w->ambient_ground=ag;w->sun_dir=sd;w->sun_color=sc;w->sun_intensity=si; w->count=0; }
 int world_add(World* w,Actor a){
