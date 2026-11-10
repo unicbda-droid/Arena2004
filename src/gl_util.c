@@ -225,7 +225,7 @@ static void px(unsigned char* d,int w,int x,int y,float r,float g,float b,float 
     p[3]=(unsigned char)(clampf(a,0,1)*255);
 }
 GLuint make_world_atlas(void){
-    enum {S=1024,T=256,N=4};
+    enum {S=1280,T=256,N=5};
     unsigned char* d=calloc(S*S,4);
     /* tile 0: dark metal panels */
     for(int y=0;y<T;y++)for(int x=0;x<T;x++){
@@ -374,6 +374,17 @@ GLuint make_world_atlas(void){
         float base=0.02f+fbm(fx*0.03f,fy*0.03f,3)*0.02f;
         px(d,S,fx,fy,base,base*1.05f,base*1.15f,1);
     }
+    /* tile 16: grass - natural ground with blades */
+    for(int y=0;y<T;y++)for(int x=0;x<T;x++){
+        int fx=x+4*T, fy=y;
+        float n=fbm(fx*0.04f,fy*0.04f,4);
+        float base=0.25f+n*0.15f;
+        float blade=fbm(fx*1.5f,fy*1.5f,2);
+        float grass = base*(0.6f+0.4f*blade);
+        float r=grass*0.25f, g=grass*1.15f, b=grass*0.35f;
+        if(fbm(fx*0.3f,fy*0.3f,3)>0.85f){ r*=0.8f; g*=0.85f; b*=0.9f; }
+        px(d,S,fx,fy,r,g,b,1);
+    }
     GLuint t=texture_create_rgba(S,S,d,true,true); free(d); return t;
 }
 
@@ -465,7 +476,7 @@ static float normal_height(int tile, float x, float y){
 }
 
 GLuint make_normal_atlas(void){
-    enum {S=1024,T=256,N=4};
+    enum {S=1280,T=256,N=5};
     unsigned char* d=malloc((size_t)S*S*4);
     if(!d) return 0;
     for(int ty=0;ty<N;ty++)for(int tx=0;tx<N;tx++){

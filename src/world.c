@@ -186,8 +186,8 @@ const char* pickup_name(int t){
     return (t>=0&&t<PICKUP_TYPE_COUNT)?n[t]:"Pickup";
 }
 const char* material_name(int m){
-    static const char* n[]={"Metal Panels","Deck Plates","Hazard Yellow","Grate","Concrete","Tech Circuit","Blue Panels","Rust Metal","White Panels","Hex Grid","Ribbed Trim","Red Armor","Yellow Tech","Blue Metal","Hazard Blue","Black Gloss"};
-    return (m>=0&&m<16)?n[m]:"Metal Panels";
+    static const char* n[]={"Metal Panels","Deck Plates","Hazard Yellow","Grate","Concrete","Tech Circuit","Blue Panels","Rust Metal","White Panels","Hex Grid","Ribbed Trim","Red Armor","Yellow Tech","Blue Metal","Hazard Blue","Black Gloss","Grass"};
+    return (m>=0&&m<17)?n[m]:"Metal Panels";
 }
 bool actor_is_weapon_pickup(int subtype,int* weapon_index){
     if(subtype>=PICK_WEAPON_AR&&subtype<=PICK_WEAPON_LIGHTNING){ if(weapon_index)*weapon_index=subtype-PICK_WEAPON_AR; return true; }

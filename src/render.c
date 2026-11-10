@@ -52,7 +52,7 @@ static const char* SCENE_FS =
 "    vec2 p = abs(N.y)>0.65 ? vWorld.xz : (abs(N.x)>0.65 ? vWorld.zy : vWorld.xy);\n"
 "    uvs = p*uUVScale;\n"
 "  } else { uvs = vUV*uUVScale; }\n"
-"  vec2 uv = uTile + fract(uvs)*0.25;\n"
+"  vec2 uv = uTile + fract(uvs)*0.20f;\n"
 "  /* Tangent frame from screen-space derivatives, then perturb the normal. */\n"
 "  {\n"
 "    vec2 tuv = uvs*0.25;\n"
@@ -329,7 +329,7 @@ void renderer_draw_model(Renderer* r,Mesh* m,Mat4 model,Color color,int material
     glUseProgram(r->prog_scene);
     shader_uniform_mat4(r->prog_scene,"uModel",model);
     shader_uniform_vec3(r->prog_scene,"uColor",v3(color.r,color.g,color.b));
-    float tx=(float)(material%4)*0.25f, ty=(float)(material/4)*0.25f;
+    float tx=(float)(material%5)*0.20f, ty=(float)(material/5)*0.20f;
     shader_uniform2f(r->prog_scene,"uTile",tx,ty);
     shader_uniform1f(r->prog_scene,"uUVScale",uvscale);
     shader_uniform1i(r->prog_scene,"uWorldUV",world_uv?1:0);
