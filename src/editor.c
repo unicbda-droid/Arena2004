@@ -778,7 +778,7 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
         cy += 20;
         float list_h = lh - (cy - ly) - 30;
         if (list_h < 24) list_h = 24;
-        int rows = (int)(list_h / 24);
+        int rows = (int)((list_h - 18) / 22);
         int max_scroll = ed->world->count > rows ? ed->world->count - rows : 0;
         if (ui_mouse_in(ui, lx + 4, cy, lw - 8, list_h)) {
             ui->mouse_over_ui = true;
@@ -786,14 +786,27 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
         }
         ed->outline_scroll = (int)clampf((float)ed->outline_scroll, 0.0f, (float)max_scroll);
         ui_push_clip(ui, (int)lx + 4, (int)cy, (int)lw - 8, (int)list_h);
+        /* outliner matrix header */
+        {
+            float hx = cy;
+            ui_rect(ui, lx + 6, hx, lw - 12, 18, col(0.10f, 0.12f, 0.15f, 1));
+            ui_rect(ui, lx + 6, hx, lw - 12, 1, col(0.24f, 0.27f, 0.32f, 1));
+            ui_text(ui, lx + 14, hx + 3, "NAME / TYPE", 8, C_DIM);
+            ui_text(ui, lx + 92, hx + 3, "POS X", 8, C_DIM);
+            ui_text(ui, lx + 122, hx + 3, "POS Y", 8, C_DIM);
+            ui_text(ui, lx + 152, hx + 3, "POS Z", 8, C_DIM);
+            ui_text(ui, lx + 182, hx + 3, "SIZE", 8, C_DIM);
+            ui_text(ui, lx + 212, hx + 3, "MAT", 8, C_DIM);
+        }
+        float row_y = cy + 18;
         for (int i = 0; i < ed->world->count; i++) {
             int vi = i - ed->outline_scroll;
             if (vi < 0 || vi >= rows) continue;
             Actor* a = &ed->world->actors[i];
-            float ry2 = cy + vi * 24;
-            bool hov = ui_mouse_in(ui, lx + 6, ry2, lw - 12, 24);
+            float ry2 = row_y + vi * 22;
+            bool hov = ui_mouse_in(ui, lx + 6, ry2, lw - 12, 22);
             bool sel = ed->selected == i;
-            ui_rect(ui, lx + 6, ry2, lw - 12, 22, sel ? col(0.18f, 0.27f, 0.38f, 1) : (hov ? col(0.13f, 0.15f, 0.18f, 1) : col(0, 0, 0, 0)));
+            ui_rect(ui, lx + 6, ry2, lw - 12, 20, sel ? col(0.18f, 0.27f, 0.38f, 1) : (hov ? col(0.13f, 0.15f, 0.18f, 1) : col(0, 0, 0, 0)));
             int ic = ICON_CUBE;
             if (a->type == ACT_LIGHT) ic = ICON_LIGHT;
             else if (a->type == ACT_PLAYER_START || a->type == ACT_NAV_POINT) ic = ICON_SPAWN;
@@ -803,7 +816,18 @@ void editor_draw_ui(Editor* ed, Ui* ui, int w, int h) {
             else if (a->type == ACT_TRIGGER) ic = ICON_LAVA;
             ui_icon(ui, ic, lx + 12, ry2 + 3, 14, sel ? C_ACCENT : C_DIM);
             char label[96]; snprintf(label, sizeof(label), "%s", a->name[0] ? a->name : actor_type_name(a->type));
-            ui_text(ui, lx + 32, ry2 + 4, label, 10, sel ? C_WHITE : C_TEXT);
+            ui_text(ui, lx + 32, ry2 + 4, label, 9, sel ? C_WHITE : C_TEXT);
+            char posx[16], posy[16], posz[16], size[32], mat[24];
+            snprintf(posx, sizeof(posx), "%.1f", a->pos.x);
+            snprintf(posy, sizeof(posy), "%.1f", a->pos.y);
+            snprintf(posz, sizeof(posz), "%.1f", a->pos.z);
+            snprintf(size, sizeof(size), "%.1f/%.1f/%.1f", a->size.x, a->size.y, a->size.z);
+            snprintf(mat, sizeof(mat), "%d %s", a->material, material_name(a->material));
+            ui_text(ui, lx + 92, ry2 + 4, posx, 9, sel ? C_WHITE : C_DIM);
+            ui_text(ui, lx + 122, ry2 + 4, posy, 9, sel ? C_WHITE : C_DIM);
+            ui_text(ui, lx + 152, ry2 + 4, posz, 9, sel ? C_WHITE : C_DIM);
+            ui_text(ui, lx + 182, ry2 + 4, size, 8, sel ? C_WHITE : C_DIM);
+            ui_text(ui, lx + 212, ry2 + 4, mat, 8, sel ? C_WHITE : C_DIM);
             if (hov) {
                 ui->mouse_over_ui = true;
                 if (ui->in.pressed) {
