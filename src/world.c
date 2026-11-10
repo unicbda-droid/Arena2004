@@ -245,10 +245,10 @@ void world_default_deck17(World* w){
     Color grass=col3(0.45f,0.65f,0.35f), dirt=col3(0.35f,0.25f,0.18f), stone=col3(0.55f,0.55f,0.58f);
 
     /* ---- terrain: flat grassy ground ---- */
-    B(w,-42,-0.6f,-42, 84,0.8f,84, 16,grass,0,0,0,"GrassFloor");
+    B(w,-42,-0.8f,-42, 84,2.0f,84, 16,grass,0,0,0,"GrassFloor");
     /* central playable arena */
-    B(w,0,-0.4f,0, 34,0.6f,34, 1,dark,0,0,0,"ArenaDeck");
-    B(w,0,-0.3f,0, 32,0.2f,32, 4,dirt,0,0,0,"ArenaEdge");
+    B(w,0,-0.6f,0, 34,0.6f,34, 1,dark,0,0,0,"ArenaDeck");
+    B(w,0,-0.5f,0, 32,0.2f,32, 4,dirt,0,0,0,"ArenaEdge");
 
     /* ---- a few decorative trees and rocks (non-solid, bots can walk through) ---- */
     for(int t=0;t<12;t++){
@@ -299,10 +299,10 @@ void world_default_deck17(World* w){
     B(w,-29,2.6f,-34, 6,5.5f,10, 1,steel,0,1, 90,"RampSW");
     B(w, 29,2.6f,-34, 6,5.5f,10, 1,steel,0,1,-90,"RampSE");
 
-    /* ---- outer walls - go all the way to the ground so nothing slips under ---- */
+    /* ---- outer walls - start above ground so nav raycasts work ---- */
     for(int s=-1;s<=1;s+=2){
-        B(w,s*40.25f,-0.55f,0, 1.5f,25,82, 13,blue,0,0,0,"WallX");
-        B(w,0,-0.55f,s*40.25f, 82,25,1.5f, 13,blue,0,0,0,"WallZ");
+        B(w,s*40.25f,0,0, 1.5f,24,82, 13,blue,0,0,0,"WallX");
+        B(w,0,0,s*40.25f, 82,24,1.5f, 13,blue,0,0,0,"WallZ");
     }
     /* wall trim strips */
     for(int s=-1;s<=1;s+=2){

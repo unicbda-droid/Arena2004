@@ -3374,7 +3374,7 @@ static void run_selftest(App* a) {
                 if (j < 0 || j >= g->nav.count) continue;
                 Vec3 d = v3sub(g->nav.nodes[j].pos, p->pos);
                 float h = sqrtf(d.x * d.x + d.z * d.z);
-                if (h > 2.0f && h < 7.0f) { target = g->nav.nodes[j].pos; have_target = true; break; }
+                if (h > 1.5f && h < 12.0f) { target = g->nav.nodes[j].pos; have_target = true; break; }
             }
         }
         if (have_target) {

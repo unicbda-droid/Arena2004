@@ -3613,9 +3613,9 @@ void game_build_nav(Game* g) {
     float minx, maxx, minz, maxz, miny, maxy;
     nav_world_bounds(g, &minx, &maxx, &minz, &maxz, &miny, &maxy);
     float area = (maxx - minx) * (maxz - minz);
-    float step = sqrtf(area / 700.0f);
-    if (step < 2.0f) step = 2.0f;
-    if (step > 6.0f) step = 6.0f;
+    float step = sqrtf(area / 900.0f);
+    if (step < 2.5f) step = 2.5f;
+    if (step > 7.0f) step = 7.0f;
     float dedupe = fmaxf(1.6f, step * 0.55f);
 
     /* Scan each column from the top down, so catwalks and upper floors are
