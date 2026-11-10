@@ -17,7 +17,7 @@ typedef enum {
     PICKUP_TYPE_COUNT
 } PickupType;
 
-typedef enum { SHAPE_BOX=0, SHAPE_RAMP, SHAPE_CYLINDER } BrushShape;
+typedef enum { SHAPE_BOX=0, SHAPE_RAMP, SHAPE_CYLINDER, SHAPE_SPHERE } BrushShape;
 
 enum { FLAG_SOLID=1, FLAG_EMISSIVE=2 };
 

@@ -242,102 +242,161 @@ void world_default_deck17(World* w){
     world_init(w); str_copy(w->name,"DM-Deck17",sizeof(w->name));
     Color dark=col3(0.24f,0.27f,0.32f), steel=col3(0.30f,0.33f,0.39f), blue=col3(0.16f,0.24f,0.38f), rust=col3(0.42f,0.30f,0.22f);
     Color orange=col3(1.0f,0.45f,0.08f), cyan=col3(0.15f,0.7f,1.0f);
+    Color grass=col3(0.45f,0.65f,0.35f), dirt=col3(0.35f,0.25f,0.18f), stone=col3(0.55f,0.55f,0.58f);
 
-    /* main deck */
-    B(w,-25.5f,-0.5f,0, 27,1,78, 1,steel,0,0,0,"DeckWest");
-    B(w, 25.5f,-0.5f,0, 27,1,78, 1,steel,0,0,0,"DeckEast");
-    B(w, 0,-0.5f, 25.5f, 24,1,27, 1,steel,0,0,0,"DeckNorth");
-    B(w, 0,-0.5f,-25.5f, 24,1,27, 1,steel,0,0,0,"DeckSouth");
-    /* pit */
-    B(w,0,-5.7f,0, 24,0.4f,24, 15,dark,0,0,0,"PitFloor");
-    B(w,0,-5.2f,0, 24,0.2f,24, 2,orange,1,0,0,"LavaSurface");
-    B(w,-12.25f,-2.75f,0, 0.5f,5.5f,24, 7,rust,0,0,0,"PitWallW");
-    B(w, 12.25f,-2.75f,0, 0.5f,5.5f,24, 7,rust,0,0,0,"PitWallE");
-    B(w,0,-2.75f,-12.25f, 24,5.5f,0.5f, 7,rust,0,0,0,"PitWallS");
-    B(w,0,-2.75f, 12.25f, 24,5.5f,0.5f, 7,rust,0,0,0,"PitWallN");
-    /* safety rail segments around pit (leave pads open) */
+    /* ---- terrain: grassy ground with rolling hills ---- */
+    /* base grass floor */
+    B(w,-42,-0.6f,-42, 84,0.8f,84, 16,grass,0,0,0,"GrassFloor");
+    /* rolling hills - mounds of dirt/grass */
+    for(int h=0;h<6;h++){
+        float hx=rndf()*70-35, hz=rndf()*70-35, hs=6+rndf()*10;
+        B(w,hx,-0.2f,hz, hs,2.5f,hs, 16,grass,0,0,0,"HillGrass");
+        B(w,hx,-0.2f,hz, hs*0.7f,1.2f,hs*0.7f, 4,dirt,0,0,0,"HillDirt");
+    }
+    /* flat playable arena platform in center */
+    B(w,0,-0.4f,0, 34,0.6f,34, 1,dark,0,0,0,"ArenaDeck");
+    B(w,0,-0.3f,0, 32,0.2f,32, 4,dirt,0,0,0,"ArenaEdge");
+
+    /* ---- trees: trunk (cylinder) + crown (sphere) ---- */
+    for(int t=0;t<24;t++){
+        float tx=rndf()*60-30, tz=rndf()*60-30;
+        /* keep trees off the arena deck */
+        if(fabsf(tx)<17 && fabsf(tz)<17) continue;
+        float th=4+rndf()*3;
+        B(w,tx,0.5f,tz, 0.7f,th,0.7f, 7,rust,0,0,0,"TreeTrunk");
+        B(w,tx,th,tz, 2.6f,2.6f,2.6f, 16,grass,0,0,SHAPE_SPHERE,"TreeCrown");
+        B(w,tx,th+1.3f,tz, 1.6f,1.6f,1.6f, 16,grass,0,0,SHAPE_SPHERE,"TreeCrown2");
+    }
+
+    /* ---- rocks / boulders ---- */
+    for(int r=0;r<16;r++){
+        float rx=rndf()*55-27, rz=rndf()*55-27;
+        if(fabsf(rx)<16 && fabsf(rz)<16) continue;
+        float rs=1.2f+rndf()*1.8f;
+        B(w,rx,0.4f,rz, rs,rs,rs, 13,stone,0,0,SHAPE_SPHERE,"Boulder");
+    }
+
+    /* ---- pit with lava ---- */
+    B(w,0,-6.2f,0, 20,0.4f,20, 15,dark,0,0,0,"PitFloor");
+    B(w,0,-5.7f,0, 18,0.2f,18, 2,orange,1,0,0,"LavaSurface");
     for(int s=-1;s<=1;s+=2){
-        B(w,s*10.5f,0.55f,-9.5f, 3,1.1f,0.25f, 10,dark,0,0,0,NULL);
-        B(w,s*10.5f,0.55f, 9.5f, 3,1.1f,0.25f, 10,dark,0,0,0,NULL);
-        B(w,-9.5f,0.55f,s*10.5f, 0.25f,1.1f,3, 10,dark,0,0,0,NULL);
-        B(w, 9.5f,0.55f,s*10.5f, 0.25f,1.1f,3, 10,dark,0,0,0,NULL);
+        B(w,s*7.5f,-3.2f,0, 0.5f,5.5f,20, 7,rust,0,0,0,"PitWallW");
+        B(w,0,-3.2f,s*7.5f, 20,5.5f,0.5f, 7,rust,0,0,0,"PitWallS");
     }
-    /* central platform */
-    B(w,0,3.0f,0, 16,0.4f,16, 1,dark,0,0,0,"CenterPlatform");
-    B(w,0,2.72f,0, 15.2f,0.16f,15.2f, 5,cyan,1,0,0,"CenterGlow");
+
+    /* ---- central platform ---- */
+    B(w,0,2.6f,0, 14,0.4f,14, 1,dark,0,0,0,"CenterPlatform");
+    B(w,0,2.32f,0, 13.2f,0.16f,13.2f, 5,cyan,1,0,0,"CenterGlow");
     for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2){
-        B(w,sx*5.5f,1.42f,sz*5.5f, 0.8f,2.9f,0.8f, 10,steel,0,0,0,"PlatformLeg");
-        B(w,sx*5.5f,2.7f,sz*5.5f, 1.2f,0.2f,1.2f, 15,dark,0,0,0,"PlatformLegCap");
+        B(w,sx*4.5f,1.12f,sz*4.5f, 0.7f,2.4f,0.7f, 10,steel,0,0,0,"PlatformLeg");
+        B(w,sx*4.5f,2.3f,sz*4.5f, 1.0f,0.2f,1.0f, 15,dark,0,0,0,"PlatformLegCap");
     }
-    /* catwalks */
-    B(w,0,5.25f, 32, 46,0.5f,6, 1,dark,0,0,0,"CatwalkNorth");
-    B(w,0,5.25f,-32, 46,0.5f,6, 1,dark,0,0,0,"CatwalkSouth");
-    B(w,0,5.5f, 34.8f, 46,1.0f,0.25f, 10,blue,0,0,0,"RailNorth");
-    B(w,0,5.5f,-34.8f, 46,1.0f,0.25f, 10,blue,0,0,0,"RailSouth");
+
+    /* ---- catwalks above ---- */
+    B(w,0,6.5f, 34, 46,0.5f,6, 1,dark,0,0,0,"CatwalkNorth");
+    B(w,0,6.5f,-34, 46,0.5f,6, 1,dark,0,0,0,"CatwalkSouth");
+    B(w,0,6.8f, 36.8f, 46,1.0f,0.25f, 10,blue,0,0,0,"RailNorth");
+    B(w,0,6.8f,-36.8f, 46,1.0f,0.25f, 10,blue,0,0,0,"RailSouth");
     for(int sx=-1;sx<=1;sx+=2){
-        B(w,sx*22.8f,5.5f, 32, 0.25f,1.0f,6, 10,blue,0,0,0,"RailEndN");
-        B(w,sx*22.8f,5.5f,-32, 0.25f,1.0f,6, 10,blue,0,0,0,"RailEndS");
-        B(w,sx*22.8f,2.75f, 32, 0.4f,5.5f,6, 7,rust,0,0,0,"CatwalkSupportN");
-        B(w,sx*22.8f,2.75f,-32, 0.4f,5.5f,6, 7,rust,0,0,0,"CatwalkSupportS");
+        B(w,sx*23.8f,6.8f, 34, 0.25f,1.0f,6, 10,blue,0,0,0,"RailEndN");
+        B(w,sx*23.8f,6.8f,-34, 0.25f,1.0f,6, 10,blue,0,0,0,"RailEndS");
+        B(w,sx*23.8f,3.4f, 34, 0.4f,6.0f,6, 7,rust,0,0,0,"CatwalkSupportN");
+        B(w,sx*23.8f,3.4f,-34, 0.4f,6.0f,6, 7,rust,0,0,0,"CatwalkSupportS");
     }
     /* ramps to catwalk */
-    B(w,-28,2.75f, 32, 6,5.5f,10, 1,steel,0,1, 90,"RampNW");
-    B(w, 28,2.75f, 32, 6,5.5f,10, 1,steel,0,1,-90,"RampNE");
-    B(w,-28,2.75f,-32, 6,5.5f,10, 1,steel,0,1, 90,"RampSW");
-    B(w, 28,2.75f,-32, 6,5.5f,10, 1,steel,0,1,-90,"RampSE");
-    /* outer walls */
+    B(w,-29,2.6f, 34, 6,5.5f,10, 1,steel,0,1, 90,"RampNW");
+    B(w, 29,2.6f, 34, 6,5.5f,10, 1,steel,0,1,-90,"RampNE");
+    B(w,-29,2.6f,-34, 6,5.5f,10, 1,steel,0,1, 90,"RampSW");
+    B(w, 29,2.6f,-34, 6,5.5f,10, 1,steel,0,1,-90,"RampSE");
+
+    /* ---- outer walls ---- */
     for(int s=-1;s<=1;s+=2){
-        B(w,s*39.25f,5,0, 1.5f,22,78, 13,blue,0,0,0,"WallX");
-        B(w,0,5,s*39.25f, 78,22,1.5f, 13,blue,0,0,0,"WallZ");
+        B(w,s*40.25f,6,0, 1.5f,24,82, 13,blue,0,0,0,"WallX");
+        B(w,0,6,s*40.25f, 82,24,1.5f, 13,blue,0,0,0,"WallZ");
     }
     /* wall trim strips */
     for(int s=-1;s<=1;s+=2){
-        B(w,s*38.4f,0.25f,0, 0.18f,0.5f,76, 5,cyan,1,0,0,"TrimLowX");
-        B(w,s*38.4f,5.9f,0, 0.18f,0.3f,76, 5,cyan,1,0,0,"TrimMidX");
-        B(w,s*38.4f,12.5f,0, 0.18f,0.25f,76, 12,orange,1,0,0,"TrimHighX");
-        B(w,0,0.25f,s*38.4f, 76,0.5f,0.18f, 5,cyan,1,0,0,"TrimLowZ");
-        B(w,0,5.9f,s*38.4f, 76,0.3f,0.18f, 5,cyan,1,0,0,"TrimMidZ");
-        B(w,0,12.5f,s*38.4f, 76,0.25f,0.18f, 12,orange,1,0,0,"TrimHighZ");
+        B(w,s*39.4f,0.2f,0, 0.18f,0.6f,80, 5,cyan,1,0,0,"TrimLowX");
+        B(w,s*39.4f,6.9f,0, 0.18f,0.3f,80, 5,cyan,1,0,0,"TrimMidX");
+        B(w,s*39.4f,13.5f,0, 0.18f,0.25f,80, 12,orange,1,0,0,"TrimHighX");
+        B(w,0,0.2f,s*39.4f, 80,0.5f,0.18f, 5,cyan,1,0,0,"TrimLowZ");
+        B(w,0,6.9f,s*39.4f, 80,0.3f,0.18f, 5,cyan,1,0,0,"TrimMidZ");
+        B(w,0,13.5f,s*39.4f, 80,0.25f,0.18f, 12,orange,1,0,0,"TrimHighZ");
     }
     /* roof beams / trusses */
-    for(int i=-3;i<=3;i++) B(w,0,13.5f,i*11.0f, 78,0.5f,0.7f, 10,dark,0,0,0,"RoofBeam");
-    for(int i=-3;i<=3;i++) B(w,i*11.0f,13.5f,0, 0.7f,0.5f,78, 10,dark,0,0,0,"RoofBeam");
-    /* corner towers / cover */
+    for(int i=-3;i<=3;i++) B(w,0,14.5f,i*11.5f, 82,0.5f,0.7f, 10,dark,0,0,0,"RoofBeam");
+    for(int i=-3;i<=3;i++) B(w,i*11.5f,14.5f,0, 0.7f,0.5f,82, 10,dark,0,0,0,"RoofBeam");
+
+    /* ---- pillars and crates ---- */
     for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2){
-        B(w,sx*30,0.3f,sz*30, 8,0.6f,8, 1,dark,0,0,0,"CornerPad");
-        B(w,sx*30,1.0f,sz*30, 8,0.2f,8, 5,cyan,1,0,0,"CornerGlow");
-        B(w,sx*34.3f,1.2f,sz*30, 0.3f,2.4f,8, 10,steel,0,0,0,"CornerRailA");
-        B(w,sx*30,1.2f,sz*34.3f, 8,2.4f,0.3f, 10,steel,0,0,0,"CornerRailB");
+        B(w,sx*18,2.4f,sz*18, 2.0f,5,2.0f, 4,steel,0,0,0,"Pillar");
+        B(w,sx*18,5.0f,sz*18, 2.6f,0.3f,2.6f, 5,cyan,1,0,0,"PillarTrim");
+        B(w,sx*21,0.7f,sz*23, 2.8f,1.4f,2.8f, 0,rust,0,0,0,"Crate");
+        B(w,sx*21,0.3f,sz*28, 1.8f,0.6f,1.8f, 15,dark,0,0,0,"LowCrate");
     }
-    /* pillars and crates */
-    for(int sx=-1;sx<=1;sx+=2)for(int sz=-1;sz<=1;sz+=2){
-        B(w,sx*17,2.5f,sz*17, 2.2f,5,2.2f, 4,steel,0,0,0,"Pillar");
-        B(w,sx*17,5.15f,sz*17, 2.8f,0.3f,2.8f, 5,cyan,1,0,0,"PillarTrim");
-        B(w,sx*20,0.75f,sz*22, 3,1.5f,3, 0,rust,0,0,0,"Crate");
-        B(w,sx*20,0.35f,sz*27, 2,0.7f,2, 15,dark,0,0,0,"LowCrate");
-    }
-    B(w,0,1.0f, 22, 4,2,2, 0,dark,0,0,0,"CenterCoverN");
-    B(w,0,1.0f,-22, 4,2,2, 0,dark,0,0,0,"CenterCoverS");
+    B(w,0,0.9f, 24, 4,2,2, 0,dark,0,0,0,"CenterCoverN");
+    B(w,0,0.9f,-24, 4,2,2, 0,dark,0,0,0,"CenterCoverS");
     /* side catwalk connectors / low bridges */
-    for(int s=-1;s<=1;s+=2) B(w,s*34,0.5f,0, 4,0.6f,14, 1,dark,0,0,0,"SideStep");
+    for(int s=-1;s<=1;s+=2) B(w,s*35,0.5f,0, 4,0.6f,14, 1,dark,0,0,0,"SideStep");
+
     /* emissive wall panels */
     for(int s=-1;s<=1;s+=2){
-        B(w,s*38.35f,8.8f, 20, 0.2f,3.0f,8, 6,blue,1,0,0,"WallPanelBlue");
-        B(w,s*38.35f,8.8f,-20, 0.2f,3.0f,8, 5,cyan,1,0,0,"WallPanelCyan");
-        B(w, 20,8.8f,s*38.35f, 8,3.0f,0.2f, 6,blue,1,0,0,"WallPanelBlueZ");
-        B(w,-20,8.8f,s*38.35f, 8,3.0f,0.2f, 5,cyan,1,0,0,"WallPanelCyanZ");
+        B(w,s*39.35f,9.6f, 22, 0.2f,3.2f,8, 6,blue,1,0,0,"WallPanelBlue");
+        B(w,s*39.35f,9.6f,-22, 0.2f,3.2f,8, 5,cyan,1,0,0,"WallPanelCyan");
+        B(w, 22,9.6f,s*39.35f, 8,3.2f,0.2f, 6,blue,1,0,0,"WallPanelBlueZ");
+        B(w,-22,9.6f,s*39.35f, 8,3.2f,0.2f, 5,cyan,1,0,0,"WallPanelCyanZ");
     }
+
     /* big "17" sign on west wall */
-    B(w,-38.1f,9.0f,-4.5f, 0.3f,5.0f,0.7f, 12,orange,1,0,0,"Sign1");
-    B(w,-38.1f,6.6f,-5.4f, 0.3f,0.5f,2.2f, 12,orange,1,0,0,"Sign1Base");
-    B(w,-38.1f,11.5f,0.7f, 0.3f,0.5f,5.2f, 12,orange,1,0,0,"Sign7Top");
-    B(w,-38.1f,9.8f,2.5f, 0.3f,3.6f,0.6f, 12,orange,1,0,0,"Sign7DiagA");
-    B(w,-38.1f,7.6f,1.4f, 0.3f,2.0f,0.6f, 12,orange,1,0,0,"Sign7DiagB");
+    B(w,-39.1f,9.8f,-5.0f, 0.3f,5.4f,0.8f, 12,orange,1,0,0,"Sign1");
+    B(w,-39.1f,7.2f,-5.9f, 0.3f,0.6f,2.4f, 12,orange,1,0,0,"Sign1Base");
+    B(w,-39.1f,12.3f,0.8f, 0.3f,0.6f,5.6f, 12,orange,1,0,0,"Sign7Top");
+    B(w,-39.1f,10.6f,2.7f, 0.3f,3.8f,0.7f, 12,orange,1,0,0,"Sign7DiagA");
+    B(w,-39.1f,8.2f,1.5f, 0.3f,2.2f,0.7f, 12,orange,1,0,0,"Sign7DiagB");
+
     /* barrels */
     for(int i=0;i<4;i++){
-        Actor a; world_actor_defaults(&a,ACT_DECOR,0); a.pos=v3(-34.0f+i*0.5f,0.6f, 20.0f); a.size=v3(1.1f,1.2f,1.1f); a.material=7; a.shape=SHAPE_CYLINDER; a.flags=FLAG_SOLID; a.color=col3(0.45f,0.30f,0.20f); world_add(w,a);
+        Actor a; world_actor_defaults(&a,ACT_DECOR,0); a.pos=v3(-35.0f+i*0.6f,0.55f, 21.0f); a.size=v3(1.0f,1.1f,1.0f); a.material=7; a.shape=SHAPE_CYLINDER; a.flags=FLAG_SOLID; a.color=col3(0.45f,0.30f,0.20f); world_add(w,a);
     }
-    Actor lava; world_actor_defaults(&lava,ACT_LAVA,0); lava.pos=v3(0,-3.5f,0); lava.size=v3(24,4,24); lava.color=col3(1.0f,0.25f,0.02f); world_add(w,lava);
+    Actor lava; world_actor_defaults(&lava,ACT_LAVA,0); lava.pos=v3(0,-4.0f,0); lava.size=v3(18,4,18); lava.color=col3(1.0f,0.25f,0.02f); world_add(w,lava);
+
+    /* pickups */
+    PK(w,-14,0.7f,-14, PICK_WEAPON_AR, 15);
+    PK(w, 14,0.7f,-14, PICK_WEAPON_SHOCK, 15);
+    PK(w,-14,0.7f, 14, PICK_WEAPON_ROCKET, 15);
+    PK(w, 14,0.7f, 14, PICK_WEAPON_FLAK, 15);
+    PK(w, 0,0.7f,  0, PICK_WEAPON_LIGHTNING, 15);
+    PK(w,-12,0.7f,  0, PICK_HEALTH_BIG, 20);
+    PK(w, 12,0.7f,  0, PICK_HEALTH_SMALL, 20);
+    PK(w,  0,0.7f,-12, PICK_ARMOR_BIG, 20);
+    PK(w,  0,0.7f, 12, PICK_ARMOR_SMALL, 20);
+    PK(w,-18,0.7f,-18, PICK_AMMO, 20);
+    PK(w, 18,0.7f, 18, PICK_AMMO, 20);
+
+    /* jump pads */
+    JP(w,-26, 0,  26,  90, 16);
+    JP(w, 26, 0,  26, -90, 16);
+    JP(w,-26, 0, -26,  90, 16);
+    JP(w, 26, 0, -26, -90, 16);
+
+    /* player starts */
+    P(w,-24,-24, 45, 0); P(w, 24,-24, -45, 0);
+    P(w,-24, 24, 135, 0); P(w, 24, 24, -135, 0);
+    P(w,  0, 28, 0, 0);   P(w,  0,-28, 180, 0);
+
+    /* lights */
+    L(w,0,7.0f,0, col3(0.72f,0.85f,1.0f), 30, 2.4f);
+    L(w,0,-2.0f,0, col3(1.0f,0.35f,0.06f), 22, 2.2f);
+    L(w,0,3.5f,0, col3(0.15f,0.85f,1.0f), 10, 1.0f);
+    for(int s=-1;s<=1;s+=2){
+        L(w,s*34,7,0, col3(0.18f,0.65f,1.0f), 22, 1.5f);
+        L(w,0,7,s*34, col3(1.0f,0.42f,0.10f), 20, 1.2f);
+        L(w,s*34,7,s*30, col3(0.75f,0.15f,0.9f), 16, 1.0f);
+        L(w,s*20,9,s*32, col3(0.55f,0.8f,1.0f), 14, 1.0f);
+        L(w,s*30,2.2f,s*30, col3(0.2f,1.0f,0.5f), 12, 0.8f);
+    }
+    L(w,0,10,22, col3(0.3f,0.5f,1.0f), 14, 0.8f);
+    L(w,0,10,-22, col3(0.3f,0.5f,1.0f), 14, 0.8f);
 
     /* lights */
     L(w,0,7.0f,0, col3(0.72f,0.85f,1.0f), 30, 2.4f);

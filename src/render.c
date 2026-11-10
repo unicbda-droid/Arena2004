@@ -352,6 +352,7 @@ void renderer_draw_world_static(Renderer* r,World* w){
         Mesh* mesh=&r->cube;
         if(a->shape==SHAPE_RAMP) mesh=&r->ramp;
         else if(a->shape==SHAPE_CYLINDER) mesh=&r->cylinder;
+        else if(a->shape==SHAPE_SPHERE) mesh=&r->sphere;
         renderer_draw_model(r,mesh,model,c,a->material,(a->flags&FLAG_EMISSIVE)?1.0f:0.0f,0.38f,true);
     }
     /* light gizmos are drawn by editor */
@@ -363,7 +364,7 @@ void renderer_draw_actor_ghost(Renderer* r,World* w,int actor,Color tint,bool wi
     Color c=col(tint.r,tint.g,tint.b,0.35f);
     if(a->type==ACT_BRUSH||a->type==ACT_DECOR||a->type==ACT_STATICMESH){
         Mat4 model=mat4_from_trs(a->pos,v3(0,a->yaw,0),a->size);
-        Mesh* mesh=&r->cube; if(a->shape==SHAPE_RAMP)mesh=&r->ramp; else if(a->shape==SHAPE_CYLINDER)mesh=&r->cylinder;
+        Mesh* mesh=&r->cube; if(a->shape==SHAPE_RAMP)mesh=&r->ramp; else if(a->shape==SHAPE_CYLINDER)mesh=&r->cylinder; else if(a->shape==SHAPE_SPHERE)mesh=&r->sphere;
         renderer_draw_model(r,mesh,model,c,a->material,0.0f,0.38f,true);
     } else {
         Mat4 model=mat4_from_trs(a->pos,v3(0,a->yaw,0),v3(0.5f,0.5f,0.5f));
