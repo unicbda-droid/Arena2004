@@ -1167,26 +1167,26 @@ void game_build_toggle(Player* p) {
     if (!p || !p->alive || p->in_vehicle) return;
     p->build_mode = !p->build_mode;
     p->build_yaw = p->yaw;
-    p->build_cd = 0.12f;
+    p->build_cd = 0.03f;
 }
 void game_build_select(Player* p, int piece) {
     if (!p) return;
     if (piece < 0) piece = 0;
     if (piece >= BUILD_PIECE_MAX) piece = BUILD_PIECE_MAX - 1;
     p->build_sel = piece;
-    p->build_cd = 0.08f;
+    p->build_cd = 0.02f;
 }
 void game_build_material(Player* p, int dir) {
     if (!p || dir == 0) return;
     p->build_mat = (p->build_mat + (dir > 0 ? 1 : BUILD_MATS - 1)) % BUILD_MATS;
-    p->build_cd = 0.08f;
+    p->build_cd = 0.02f;
 }
 void game_build_rotate(Player* p) {
     if (!p) return;
     p->build_yaw += (float)PI * 0.5f;
     while (p->build_yaw >= (float)PI * 2.0f) p->build_yaw -= (float)PI * 2.0f;
     while (p->build_yaw < 0.0f) p->build_yaw += (float)PI * 2.0f;
-    p->build_cd = 0.08f;
+    p->build_cd = 0.02f;
 }
 static float build_snap(float v, float step) { return floorf(v / step + 0.5f) * step; }
 
@@ -1285,7 +1285,7 @@ bool game_build_attempt(Game* g, Player* p) {
     if (!g || !p || !p->alive || p->in_vehicle || p->build_cd > 0.0f) return false;
     Vec3 pos, size; float yaw; int shape; bool valid;
     if (!game_build_preview(g, p, &pos, &size, &yaw, &shape, &valid) || !valid) {
-        p->build_cd = 0.18f;
+        p->build_cd = 0.05f;
         return false;
     }
     if (p->mats[p->build_mat] < BUILD_COST) {
@@ -1293,14 +1293,14 @@ bool game_build_attempt(Game* g, Player* p) {
             game_pickup_msg(g, "Nicht genug %s - sammle mit E", game_build_material_name(p->build_mat));
             audio_play(SFX_UI_CLICK, 0.25f, 0.0f);
         }
-        p->build_cd = 0.25f;
+        p->build_cd = 0.05f;
         return false;
     }
     int slot = -1;
     for (int i = 0; i < MAX_BUILDS; i++) if (!g->builds[i].active) { slot = i; break; }
     if (slot < 0) {
         if (p->id == g->local_player) game_pickup_msg(g, "Bau-Limit erreicht");
-        p->build_cd = 0.30f;
+        p->build_cd = 0.05f;
         return false;
     }
     Actor a;
@@ -1330,7 +1330,7 @@ bool game_build_attempt(Game* g, Player* p) {
     b->size = size;
     b->yaw = yaw * RAD2DEG;
     p->mats[p->build_mat] -= BUILD_COST;
-    p->build_cd = 0.14f;
+    p->build_cd = 0.03f;
     p->fire_timer = 0.06f;
 
     for (int i = 0; i < 10; i++) {
