@@ -4045,6 +4045,17 @@ static void bot_think(Game* g, Player* p, float dt) {
                 RayHit ph;
                 if (!world_raycast(g->world, pr, 4.2f, true, &ph) || ph.normal.y < 0.5f) safe = false;
             }
+            /* Wand direkt vorne: nicht hineinrennen, stattdessen ausweichen */
+            if (safe && wl > 0.05f) {
+                Ray wr; wr.origin = v3add(p->pos, v3(0, 1.0f, 0)); wr.dir = dir;
+                RayHit wh;
+                if (world_raycast(g->world, wr, 2.2f, true, &wh) && wh.normal.y < 0.5f) {
+                    safe = false;
+                    /* Seitlich ausweichen statt stehen bleiben */
+                    strafe = (wh.point.x > p->pos.x) ? -0.9f : 0.9f;
+                    fwd = 0.0f;
+                }
+            }
             if (!safe) { fwd = 0; strafe = 0; }
         }
     }
@@ -4999,35 +5010,47 @@ void game_render_players(Game* g, Renderer* r) {
         Vec3 base = p->render_pos;
         float crouch = p->crouch ? -0.32f : 0.0f;
 
-        /* legs */
+        /* legs - thigh + shin + foot, knee bends with swing */
         for (int s = -1; s <= 1; s += 2) {
-            Vec3 hip = v3add(base, v3add(v3mul(rt, s * 0.17f), v3(0, 0.78f + crouch, 0)));
-            Vec3 knee = v3add(hip, v3add(v3mul(f, swing * s), v3(0, -0.4f, 0)));
+            Vec3 hip = v3add(base, v3add(v3mul(rt, s * 0.19f), v3(0, 0.86f + crouch, 0)));
+            float knee_swing = sinf(p->bob * 2.2f) * fminf(speed * 0.05f, 0.45f);
+            Vec3 knee = v3add(hip, v3add(v3mul(f, knee_swing * s), v3(0, -0.50f, 0)));
+            Vec3 shin = v3add(knee, v3add(v3mul(f, -knee_swing * s * 0.5f), v3(0, -0.45f, 0)));
+            Vec3 foot = v3add(shin, v3(0, -0.25f, s * 0.05f));
             draw_box(r, lerp3(hip, knee, 0.5f), v3(0.22f, 0.44f, 0.24f), dark, 0, yaw, 0);
-            Vec3 foot = v3add(knee, v3add(v3mul(f, -swing * s * 0.5f), v3(0, -0.38f, 0)));
-            draw_box(r, foot, v3(0.24f, 0.42f, 0.26f), col_mul(dark, 0.8f), 0, yaw, 0);
-            draw_box(r, v3add(foot, v3(0, -0.2f, 0)), v3(0.26f, 0.14f, 0.36f), col3(0.12f, 0.13f, 0.15f), 15, yaw, 0);
+            draw_box(r, lerp3(knee, shin, 0.5f), v3(0.20f, 0.40f, 0.22f), col_mul(dark, 0.85f), 0, yaw, 0);
+            draw_box(r, foot, v3(0.28f, 0.16f, 0.42f), col3(0.12f, 0.13f, 0.15f), 15, yaw, 0);
         }
-        /* torso */
-        Vec3 torso = v3add(base, v3(0, 1.17f + crouch, 0));
-        draw_box(r, torso, v3(0.66f, 0.58f, 0.38f), team, 11, yaw, 0.05f);
-        draw_box(r, v3add(torso, v3(0, 0.02f, 0)), v3(0.42f, 0.42f, 0.44f), dark, 0, yaw, 0);
-        /* shoulders */
+        /* torso - chest + belly separation */
+        Vec3 chest = v3add(base, v3(0, 1.20f + crouch, 0));
+        draw_box(r, chest, v3(0.58f, 0.52f, 0.34f), team, 11, yaw, 0.05f);
+        Vec3 belly = v3add(base, v3(0, 0.94f + crouch, 0));
+        draw_box(r, belly, v3(0.52f, 0.28f, 0.30f), col_mul(team, 0.9f), 11, yaw, 0.04f);
+        /* collar */
+        draw_box(r, v3add(chest, v3(0, 0.22f, 0)), v3(0.42f, 0.14f, 0.36f), dark, 0, yaw, 0.02f);
+        /* shoulders + arms - upper + forearm + hand */
         for (int s = -1; s <= 1; s += 2) {
-            Vec3 sh = v3add(base, v3add(v3mul(rt, s * 0.44f), v3(0, 1.34f + crouch, 0)));
-            draw_box(r, sh, v3(0.26f, 0.24f, 0.34f), team, 11, yaw, 0.08f);
-            Vec3 hand = v3add(sh, v3add(v3mul(f, p->zombie ? 0.62f : 0.34f), v3mul(rt, -s * 0.06f)));
-            hand.y -= p->zombie ? 0.04f : 0.22f;
-            draw_box(r, v3lerp(sh, hand, 0.55f), v3(0.17f, p->zombie ? 0.36f : 0.5f, 0.19f), dark, 0, yaw, 0);
+            Vec3 sh = v3add(base, v3add(v3mul(rt, s * 0.50f), v3(0, 1.40f + crouch, 0)));
+            float arm_swing = -swing * s;
+            Vec3 elbow = v3add(sh, v3add(v3mul(f, arm_swing * 0.35f), v3(0, -0.34f, 0)));
+            Vec3 wrist = v3add(elbow, v3add(v3mul(f, arm_swing * 0.35f), v3(0, -0.36f, 0)));
+            Vec3 hand = v3add(wrist, v3add(v3mul(f, 0.30f), v3mul(rt, s * 0.04f)));
+            hand.y -= 0.08f;
+            draw_box(r, sh, v3(0.24f, 0.26f, 0.32f), team, 11, yaw, 0.06f);
+            draw_box(r, lerp3(sh, elbow, 0.5f), v3(0.18f, 0.34f, 0.20f), dark, 0, yaw, 0);
+            draw_box(r, lerp3(elbow, wrist, 0.5f), v3(0.16f, 0.30f, 0.18f), dark, 0, yaw, 0);
+            draw_box(r, hand, v3(0.14f, 0.22f, 0.18f), skin, 0, yaw, 0);
         }
-        /* head + helmet */
-        Vec3 head = v3add(base, v3(0, 1.66f + crouch, 0));
+        /* head + neck */
+        Vec3 neck = v3add(base, v3(0, 1.50f + crouch, 0));
+        draw_box(r, neck, v3(0.30f, 0.16f, 0.30f), skin, 0, yaw, 0);
+        Vec3 head = v3add(base, v3(0, 1.64f + crouch, 0));
         renderer_draw_model(r, &r->sphere, mat4_from_trs(head, v3(0, yaw, 0), v3(0.34f, 0.36f, 0.34f)), skin, 0, 0, 1, false);
         if (!p->zombie) {
-            draw_box(r, v3add(head, v3(0, 0.13f, 0)), v3(0.38f, 0.16f, 0.38f), team, 11, yaw, 0.08f);
-            Vec3 visor = v3add(head, v3mul(f, 0.14f));
+            draw_box(r, v3add(head, v3(0, 0.13f, 0)), v3(0.40f, 0.18f, 0.40f), team, 11, yaw, 0.08f);
+            Vec3 visor = v3add(head, v3mul(f, 0.15f));
             visor.y += 0.02f;
-            draw_box(r, visor, v3(0.28f, 0.09f, 0.08f), col(0.15f, 0.85f, 1.0f, 1.0f), 5, yaw, 1.4f);
+            draw_box(r, visor, v3(0.30f, 0.10f, 0.08f), col(0.15f, 0.85f, 1.0f, 1.0f), 5, yaw, 1.4f);
         } else {
             /* glowing predator eyes instead of a helmet visor */
             Color ec = p->zombie_type == 3 ? col(0.55f, 1.0f, 0.25f, 1.0f) : col(1.0f, 0.22f, 0.10f, 1.0f);

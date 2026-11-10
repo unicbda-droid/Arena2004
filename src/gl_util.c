@@ -271,14 +271,15 @@ GLuint make_world_atlas(void){
         if(cellx>0.2f&&cellx<0.8f&&celly>0.2f&&celly<0.8f) base=0.015f;
         px(d,S,fx,fy,base*0.9f,base,base*1.1f,1);
     }
-    /* tile 4: concrete */
+    /* tile 4: concrete - grungy ground with cracks */
     for(int y=0;y<T;y++)for(int x=0;x<T;x++){
         int fx=x, fy=y+T;
         float n=fbm(fx*0.02f,fy*0.02f,5);
-        float base=0.16f+n*0.14f;
-        if(fmodf(x/128.0f,1.0f)<0.02f||fmodf(y/128.0f,1.0f)<0.02f) base*=0.65f;
-        if(fbm(fx*0.2f,fy*0.2f,2)>0.7f) base*=0.85f;
-        px(d,S,fx,fy,base*1.02f,base*0.98f,base*0.92f,1);
+        float base=0.22f+n*0.18f;
+        float crack=fbm(fx*0.5f,fy*0.5f,3);
+        if(crack>0.85f) base*=0.5f;
+        if(fmodf(x/128.0f,1.0f)<0.02f||fmodf(y/128.0f,1.0f)<0.02f) base*=0.6f;
+        px(d,S,fx,fy,base*0.98f,base*0.92f,base*0.88f,1);
     }
     /* tile 5: tech circuit (emissive-ish) */
     for(int y=0;y<T;y++)for(int x=0;x<T;x++){
