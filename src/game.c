@@ -3281,8 +3281,8 @@ static bool nav_link_ok(Game* g, Vec3 a, Vec3 b) {
         }
         Ray r; r.origin = v3add(p, v3(0, 1.0f, 0)); r.dir = v3(0, -1, 0);
         RayHit h;
-        if (!world_raycast(g->world, r, 3.4f, true, &h)) return false;
-        if (h.normal.y < 0.5f) return false;
+        if (!world_raycast(g->world, r, 5.0f, true, &h)) return false;
+        if (h.normal.y < 0.4f) return false;
     }
     return true;
 }
@@ -3293,7 +3293,7 @@ static bool nav_segment_ok(Game* g, Vec3 a, Vec3 b) {
     float dist = v3len(d);
     if (dist < 0.05f) return true;
     Vec3 dir = v3mul(d, 1.0f / dist);
-    Ray r; r.origin = v3add(a, v3(0, 0.1f, 0)); r.dir = dir;
+    Ray r; r.origin = v3add(a, v3(0, 0.3f, 0)); r.dir = dir;
     RayHit h;
     if (world_raycast(g->world, r, dist - 0.35f, true, &h)) return false;
     return nav_link_ok(g, a, b);
@@ -3613,9 +3613,9 @@ void game_build_nav(Game* g) {
     float minx, maxx, minz, maxz, miny, maxy;
     nav_world_bounds(g, &minx, &maxx, &minz, &maxz, &miny, &maxy);
     float area = (maxx - minx) * (maxz - minz);
-    float step = sqrtf(area / 1100.0f);
-    if (step < 3.0f) step = 3.0f;
-    if (step > 8.0f) step = 8.0f;
+    float step = sqrtf(area / 700.0f);
+    if (step < 2.0f) step = 2.0f;
+    if (step > 6.0f) step = 6.0f;
     float dedupe = fmaxf(1.6f, step * 0.55f);
 
     /* Scan each column from the top down, so catwalks and upper floors are
@@ -3924,6 +3924,9 @@ static void bot_think(Game* g, Player* p, float dt) {
             have_move = true;
         }
     }
+    /* Fallback: no nav path? Steer directly toward the goal. The movement
+     * collision code will stop the bot at walls, so it won't run through them. */
+    if (!have_move && have_goal) { move_target = goal; have_move = true; }
     if (!have_move) { move_target = p->pos; have_move = true; }
 
     /* Boarding: nav nodes can end several units away from a parked vehicle.
@@ -4045,18 +4048,7 @@ static void bot_think(Game* g, Player* p, float dt) {
                 RayHit ph;
                 if (!world_raycast(g->world, pr, 4.2f, true, &ph) || ph.normal.y < 0.5f) safe = false;
             }
-            /* Wand direkt vorne: nicht hineinrennen, stattdessen ausweichen */
-            if (safe && wl > 0.05f) {
-                Ray wr; wr.origin = v3add(p->pos, v3(0, 1.0f, 0)); wr.dir = dir;
-                RayHit wh;
-                if (world_raycast(g->world, wr, 2.2f, true, &wh) && wh.normal.y < 0.5f) {
-                    safe = false;
-                    /* Seitlich ausweichen statt stehen bleiben */
-                    strafe = (wh.point.x > p->pos.x) ? -0.9f : 0.9f;
-                    fwd = 0.0f;
-                }
-            }
-            if (!safe) { fwd = 0; strafe = 0; }
+            if (!safe) { fwd = 0; strafe = (p->id & 1) ? 0.7f : -0.7f; }
         }
     }
     p->input.move_x = strafe;

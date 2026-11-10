@@ -244,44 +244,34 @@ void world_default_deck17(World* w){
     Color orange=col3(1.0f,0.45f,0.08f), cyan=col3(0.15f,0.7f,1.0f);
     Color grass=col3(0.45f,0.65f,0.35f), dirt=col3(0.35f,0.25f,0.18f), stone=col3(0.55f,0.55f,0.58f);
 
-    /* ---- terrain: grassy ground with rolling hills ---- */
-    /* base grass floor */
+    /* ---- terrain: flat grassy ground ---- */
     B(w,-42,-0.6f,-42, 84,0.8f,84, 16,grass,0,0,0,"GrassFloor");
-    /* rolling hills - mounds of dirt/grass */
-    for(int h=0;h<6;h++){
-        float hx=rndf()*70-35, hz=rndf()*70-35, hs=6+rndf()*10;
-        B(w,hx,-0.2f,hz, hs,2.5f,hs, 16,grass,0,0,0,"HillGrass");
-        B(w,hx,-0.2f,hz, hs*0.7f,1.2f,hs*0.7f, 4,dirt,0,0,0,"HillDirt");
-    }
-    /* flat playable arena platform in center */
+    /* central playable arena */
     B(w,0,-0.4f,0, 34,0.6f,34, 1,dark,0,0,0,"ArenaDeck");
     B(w,0,-0.3f,0, 32,0.2f,32, 4,dirt,0,0,0,"ArenaEdge");
 
-    /* ---- trees: trunk (cylinder) + crown (sphere) ---- */
-    for(int t=0;t<24;t++){
+    /* ---- a few decorative trees and rocks (non-solid, bots can walk through) ---- */
+    for(int t=0;t<12;t++){
         float tx=rndf()*60-30, tz=rndf()*60-30;
         /* keep trees off the arena deck */
         if(fabsf(tx)<17 && fabsf(tz)<17) continue;
         float th=4+rndf()*3;
-        B(w,tx,0.5f,tz, 0.7f,th,0.7f, 7,rust,0,0,0,"TreeTrunk");
-        B(w,tx,th,tz, 2.6f,2.6f,2.6f, 16,grass,0,0,SHAPE_SPHERE,"TreeCrown");
-        B(w,tx,th+1.3f,tz, 1.6f,1.6f,1.6f, 16,grass,0,0,SHAPE_SPHERE,"TreeCrown2");
+        Actor tr; world_actor_defaults(&tr,ACT_BRUSH,0); tr.pos=v3(tx,0.5f,tz); tr.size=v3(0.7f,th,0.7f); tr.material=7; tr.color=col3(0.45f,0.30f,0.20f); tr.shape=SHAPE_CYLINDER; tr.flags=0; world_add(w,tr);
+        Actor cr; world_actor_defaults(&cr,ACT_BRUSH,0); cr.pos=v3(tx,th,tz); cr.size=v3(2.4f,2.4f,2.4f); cr.material=16; cr.color=grass; cr.shape=SHAPE_SPHERE; cr.flags=0; world_add(w,cr);
     }
-
-    /* ---- rocks / boulders ---- */
-    for(int r=0;r<16;r++){
-        float rx=rndf()*55-27, rz=rndf()*55-27;
+    for(int r=0;r<8;r++){
+        float rx=rndf()*50-25, rz=rndf()*50-25;
         if(fabsf(rx)<16 && fabsf(rz)<16) continue;
-        float rs=1.2f+rndf()*1.8f;
-        B(w,rx,0.4f,rz, rs,rs,rs, 13,stone,0,0,SHAPE_SPHERE,"Boulder");
+        float rs=1.2f+rndf()*1.6f;
+        Actor bo; world_actor_defaults(&bo,ACT_BRUSH,0); bo.pos=v3(rx,0.4f,rz); bo.size=v3(rs,rs,rs); bo.material=13; bo.color=stone; bo.shape=SHAPE_SPHERE; bo.flags=0; world_add(w,bo);
     }
 
-    /* ---- pit with lava ---- */
-    B(w,0,-6.2f,0, 20,0.4f,20, 15,dark,0,0,0,"PitFloor");
-    B(w,0,-5.7f,0, 18,0.2f,18, 2,orange,1,0,0,"LavaSurface");
+    /* ---- pit with lava - walls go all the way down so no one slips through ---- */
+    B(w,0,-6.6f,0, 20,0.4f,20, 15,dark,0,0,0,"PitFloor");
+    B(w,0,-6.1f,0, 18,0.2f,18, 2,orange,1,0,0,"LavaSurface");
     for(int s=-1;s<=1;s+=2){
-        B(w,s*7.5f,-3.2f,0, 0.5f,5.5f,20, 7,rust,0,0,0,"PitWallW");
-        B(w,0,-3.2f,s*7.5f, 20,5.5f,0.5f, 7,rust,0,0,0,"PitWallS");
+        B(w,s*7.5f,-3.2f,0, 0.5f,6.0f,20, 7,rust,0,0,0,"PitWallW");
+        B(w,0,-3.2f,s*7.5f, 20,6.0f,0.5f, 7,rust,0,0,0,"PitWallS");
     }
 
     /* ---- central platform ---- */
@@ -309,10 +299,10 @@ void world_default_deck17(World* w){
     B(w,-29,2.6f,-34, 6,5.5f,10, 1,steel,0,1, 90,"RampSW");
     B(w, 29,2.6f,-34, 6,5.5f,10, 1,steel,0,1,-90,"RampSE");
 
-    /* ---- outer walls ---- */
+    /* ---- outer walls - go all the way to the ground so nothing slips under ---- */
     for(int s=-1;s<=1;s+=2){
-        B(w,s*40.25f,6,0, 1.5f,24,82, 13,blue,0,0,0,"WallX");
-        B(w,0,6,s*40.25f, 82,24,1.5f, 13,blue,0,0,0,"WallZ");
+        B(w,s*40.25f,-0.55f,0, 1.5f,25,82, 13,blue,0,0,0,"WallX");
+        B(w,0,-0.55f,s*40.25f, 82,25,1.5f, 13,blue,0,0,0,"WallZ");
     }
     /* wall trim strips */
     for(int s=-1;s<=1;s+=2){

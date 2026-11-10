@@ -342,6 +342,9 @@ void renderer_draw_world_static(Renderer* r,World* w){
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,r->normal_tex);
     glActiveTexture(GL_TEXTURE0);
     shader_uniform1i(r->prog_scene,"uViewmodel",0);
+    /* World brushes are drawn double-sided so they are never "invisible from
+     * one side" (no backface culling on map geometry). */
+    glDisable(GL_CULL_FACE);
     for(int i=0;i<w->count;i++){
         Actor* a=&w->actors[i];
         if(a->type==ACT_TRIGGER||a->type==ACT_LIGHT||a->type==ACT_PLAYER_START||a->type==ACT_PICKUP||a->type==ACT_JUMPPAD||a->type==ACT_LAVA||a->type==ACT_NAV_POINT) continue;
@@ -356,6 +359,7 @@ void renderer_draw_world_static(Renderer* r,World* w){
         renderer_draw_model(r,mesh,model,c,a->material,(a->flags&FLAG_EMISSIVE)?1.0f:0.0f,0.38f,true);
     }
     /* light gizmos are drawn by editor */
+    glEnable(GL_CULL_FACE);
     glUseProgram(0);
 }
 void renderer_draw_actor_ghost(Renderer* r,World* w,int actor,Color tint,bool wire){
